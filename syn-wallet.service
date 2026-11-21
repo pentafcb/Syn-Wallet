@@ -1,0 +1,17 @@
+[Unit]
+Description=Syn Wallet — public non-custodial crypto wallet
+After=network.target
+[Service]
+Type=simple
+WorkingDirectory=/root/syn-wallet
+ExecStart=/usr/bin/node dist/server.js
+Restart=always
+RestartSec=3
+Environment=NODE_ENV=production
+Environment=PORT=8801
+Environment=SYN_REDIRECT_PORT=8800
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+[Install]
+WantedBy=multi-user.target

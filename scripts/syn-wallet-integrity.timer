@@ -1,0 +1,10 @@
+[Unit]
+Description=Hourly Syn Wallet release integrity check
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+Unit=syn-wallet-integrity.service
+
+[Install]
+WantedBy=timers.target

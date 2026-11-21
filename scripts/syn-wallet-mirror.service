@@ -1,0 +1,15 @@
+# Syn Wallet :8803 mirror — persistent unit (audit NEW LOW 11).
+# Install: cp to /etc/systemd/system/, systemctl daemon-reload,
+# systemctl enable --now syn-wallet-mirror.service
+[Unit]
+Description=Syn Wallet mirror (:8803 -> :8801 same-box proxy)
+After=network.target syn-wallet.service
+Wants=syn-wallet.service
+
+[Service]
+ExecStart=/usr/bin/node /root/syn-wallet/scripts/mirror-8803.cjs
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

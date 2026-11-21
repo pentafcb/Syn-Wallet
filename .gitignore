@@ -1,0 +1,7 @@
+node_modules/
+dist/
+data/
+*.log
+proof-rig/
+public/boot-watchdog.js
+public/release-manifest.json

@@ -1,0 +1,8 @@
+[Unit]
+Description=Syn Wallet release integrity check (served assets vs release manifest)
+After=network.target syn-wallet.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/syn-wallet
+ExecStart=/usr/bin/node /root/syn-wallet/scripts/integrity-check.mjs
