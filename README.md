@@ -19,7 +19,7 @@ Syn's first public live project: a **non-custodial, phone-first, multi-chain cry
 - **Multi-chain from one seed, BIP44:** Solana `m/44'/501'/0'/0'` (SLIP-0010 ed25519), EVM `m/44'/60'/0'/0/0`, Bitcoin SegWit `m/84'/0'/0'/0/0` (bc1q). Derivation is verified against known test vectors in `tests/`.
 - **Home:** total USD balance + per-asset live balances (Solana mainnet-beta, public EVM RPCs, Blockstream for BTC) and live USD prices via CoinGecko (proxied/cached server-side 60s). Honest unavailable states — never a faked 0 or price.
 - **Live Ticker Chart** (asset detail + home hero): real CoinGecko `market_chart` history via the server proxy, 24H/7D/1M ranges, live polling every 25s appending the real current price, "now" marker with pulse + LIVE indicator, gridlines with right-gutter price labels and a time axis. No fake data — if live data is unavailable the last real chart is shown without animation.
-- **Receive:** per-chain address + QR + copy. **Send:** native sends on Solana and all EVM chains (local signing, confirm screen, tx hash + explorer link). **Bitcoin is receive/balance in v1** — its Send button is honestly labelled "coming soon", no fake send.
+- **Receive:** per-chain address + QR + copy. **Send:** native sends on Solana and all EVM chains (local signing, confirm screen, tx hash + explorer link). Bitcoin and Litecoin also send natively via the shared UTXO stack (coin selection, local signing, broadcast with txid verification).
 - **Activity:** recent transactions per chain via public APIs/RPC (Solana RPC, Blockstream, Blockscout) with explorer links; honest empty states.
 - **PWA:** installable, manifest + icons from the Syn chrome "S" logo.
 
@@ -40,7 +40,7 @@ Deploy (sober77): rsync the repo (excluding node_modules/dist/data) to `/root/sy
 
 ## Known v1 limitations
 
-- BTC send not yet implemented (receive/balance/activity only).
+- BTC/LTC sends ride public esplora APIs (Blockstream/mempool.space, litecoinspace) — a first real-funds send on each UTXO chain should be a tiny test amount.
 - EVM activity depends on Blockscout public APIs; Solana/BTC activity on public RPC/Blockstream — any of them can rate-limit, in which case the UI shows an honest unavailable/empty state.
 - HTTPS uses a self-signed certificate (same pattern as the other Syn apps) — browsers show a warning until it is trusted.
 - Only native assets are shown in v1 (no SPL/ERC-20 token list yet).
@@ -49,6 +49,6 @@ Deploy (sober77): rsync the repo (excluding node_modules/dist/data) to `/root/sy
 
 Implemented: CSPRNG entropy via @scure/bip39 (12 words / 128-bit, optional 24 words / 256-bit); AES-256-GCM vault, PBKDF2-HMAC-SHA256 at 600,000 iterations (OWASP), random 32-byte salt + unique IV per encryption, versioned vault format; decrypted material in memory only, wiped on lock; unlock throttling with growing delays; configurable auto-lock (1/5/15 min); app always starts locked; backup words blurred until tap-to-reveal and re-hidden when the tab loses visibility; word-by-word seed import with BIP39 autocomplete; seed clipboard copy auto-clears after ~20s; reveal-phrase is password-gated every time and auto-hides after 30s; clear-signing send confirmations (network, validated recipient, amount, estimated fee, balance after) with EIP-55/base58 validation hard-blocking bad addresses and an address-poisoning similarity warning; no dApp/message signing surface in v1; strict CSP with everything self-hosted (no CDNs), X-Frame-Options DENY / frame protection, Referrer-Policy no-referrer, Permissions-Policy locked down, HSTS, HTTPS-only (HTTP only redirects, plus an in-app HTTP warning).
 
-Not in v1, honestly: device biometrics/WebAuthn unlock (left out — it cannot wrap the vault key without weakening the password vault); BTC sending; hardware-wallet support.
+Not in v1, honestly: device biometrics/WebAuthn unlock (left out — it cannot wrap the vault key without weakening the password vault); hardware-wallet support.
 
 Out of scope for any web wallet (MetaMask states the same): a compromised device, browser or clipboard at the OS level, and physical coercion. Syn can never recover a wallet — only the recovery phrase can.
