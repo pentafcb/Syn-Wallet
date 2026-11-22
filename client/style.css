@@ -1155,6 +1155,38 @@ input,textarea,select{font-size:16px!important}
 .polyLiveState{display:inline-flex;align-items:center;gap:5px;font-weight:650;flex:none}
 .polyMain{padding-bottom:calc(124px + env(safe-area-inset-bottom))}
 .polyStaleNote{padding:2px 16px 8px;font-size:12px;color:var(--amber)}
+/* Event card (finalized standalone port): fill-panel + stroke-lit,
+   orb tile with the event image, underlined title, silver-bar rows,
+   quiet footer — no gauge, no tips, no LIVE. */
+.evcCard{background-image:linear-gradient(100deg,#0d0d0d 0%,#141414 55%,#191919 100%);border:0;border-radius:16px;padding:16px;font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;transition:transform 200ms cubic-bezier(.2,.9,.25,1)}
+.evcCard:hover{transform:translateY(-2px)}
+.evcHead{display:flex;align-items:flex-start;gap:12px}
+.evcBadge{position:relative;display:grid;place-items:center;width:44px;height:44px;flex:none;border-radius:12px;overflow:hidden;font-size:18px;font-weight:700;line-height:1;color:#fff;background:radial-gradient(circle at 68% 6%,rgba(233,167,128,.9) 0%,rgba(233,167,128,0) 32%),radial-gradient(circle at 27% 16%,rgba(182,211,230,.85) 0%,rgba(182,211,230,0) 44%),radial-gradient(circle at 8% 44%,rgba(160,124,130,.5) 0%,rgba(160,124,130,0) 36%),linear-gradient(180deg,#98a4cf 0%,#7588db 32%,#6a88ee 52%,#47579c 82%,#313763 100%);background-size:130% 130%;background-position:50% 50%}
+.evcBadgeImg{width:100%;height:100%;object-fit:cover;border-radius:12px}
+.evcTitle{flex:1;min-width:0;margin-top:4px;font-size:14px;font-weight:600;color:#f5f5f5;text-decoration:underline;text-decoration-color:rgba(255,255,255,.2);text-underline-offset:4px;line-height:1.35}
+.evcRows{margin-top:10px}
+.evcRow{display:flex;align-items:center;gap:14px;width:100%;padding:11px 0;border:0;border-bottom:1px solid rgba(255,255,255,.06);background:none;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.evcRow:last-child{border-bottom:none}
+.evcLbl{flex:1;min-width:0;font-size:13.5px;color:#e8eaee;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.evcRow:hover .evcLbl{color:#fff}
+.evcBar{flex:none;width:84px;height:6px;border-radius:99px;background:rgba(255,255,255,.08);overflow:hidden}
+.evcBar span{display:block;height:100%;border-radius:99px;background:#c7d0da}
+.evcPct{flex:none;width:52px;text-align:right;font-size:14px;font-weight:700;color:#f5f5f5;font-variant-numeric:tabular-nums}
+.evcFoot{margin-top:12px;display:flex;align-items:center;justify-content:space-between;gap:10px}
+.evcMeta{font-size:11px;color:#737373;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.evcBookmark{display:grid;place-items:center;width:24px;height:24px;flex:none;border:0;border-radius:50%;background:none;color:#737373;cursor:pointer;padding:0;position:relative}
+/* Audit fix: 24px/28px controls are mis-tap-prone — expand the hit
+   area to ~40px without changing the visual size. */
+.evcBookmark::after,.mmcBookmark::after{content:'';position:absolute;inset:-8px}
+.detCopy{position:relative}
+.detCopy::after{content:'';position:absolute;inset:-6px}
+.netChip,.polyCat{position:relative}
+.netChip::after,.polyCat::after{content:'';position:absolute;inset:-3px 0}
+.evcBookmark:hover{background:rgba(255,255,255,.08);color:#f5f5f5}
+.evcBookmark.on{color:#f5f5f5}
+.evcBookmark svg{width:16px;height:16px}
+.polyMoreWrap{display:flex;justify-content:center;padding:14px 16px 20px}
+.polyMoreBtn{border-radius:999px;padding:10px 22px}
 .polyOutPills{display:flex;gap:8px;padding:14px 16px 0}
 .polyOutPill{flex:1;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:11px 13px;border-radius:13px;background:var(--surface);border:1px solid var(--line);color:var(--text);font-size:14px;font-weight:600}
 .polyOutPill b{font-variant-numeric:tabular-nums;font-weight:700}
@@ -1311,7 +1343,7 @@ input,textarea,select{font-size:16px!important}
 .mmcDot{width:6px;height:6px;border-radius:50%;background:#f87171}
 .mmcLive b{color:#f87171;font-weight:600}
 .mmcLive span{color:#737373}
-.mmcBookmark{display:grid;place-items:center;width:24px;height:24px;border-radius:50%;color:#737373;background:none;border:0;padding:0}
+.mmcBookmark{display:grid;place-items:center;width:24px;height:24px;border-radius:50%;color:#737373;background:none;border:0;padding:0;position:relative}
 .mmcBookmark:hover{background:rgba(255,255,255,.08);color:#f5f5f5}
 .mmcBookmark svg{width:16px;height:16px}
 .mmcBookmark.on{color:#f5f5f5}

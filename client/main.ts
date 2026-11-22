@@ -17,7 +17,7 @@ import { renderTickerChart, fmtUsd, fmtPrice, priceDp } from './lib/chart';
 import { CURRENCIES, currencyCode, currencySymbol, convertUsd, setCurrency, fetchFxRates, fxRateFor, effectiveCode, currencyDecimals } from './lib/currency';
 import { chainIcon, tokenIcon, chainIconUrl, tokenIconUrl, iconHTML, stackIconHTML, underlyingIcon, underlyingIconUrl, commodityIcon, stockIcon } from './lib/icons';
 import { TOKEN_CATALOG, POPULAR_TOKEN_IDS } from './lib/token-catalog';
-import { gammaEvents, gammaEventBySlug, upDownSlug, parseUpDownSlug, UPDOWN_ASSETS, UPDOWN_TFS, clobBook, clobHistory, polyPositions, polyTrades, polyFeed, deriveClobCreds, buildSignedOrder, postOrder, getOpenOrders, cancelPolyOrder, verifyOrderSignature, limitRawAmounts, marketRawAmounts, walkPrice, roundConfigFor, relayerDeployed, CTF_EXCHANGE_V2, NEG_RISK_EXCHANGE_V2, PUSD, USDC_E, USDC_NATIVE, type PolyEvent, type PolyMarket, type PolyPosition, type PolyOpenOrder, type ClobCreds, type Book } from './lib/polymarket';
+import { gammaEvents, gammaEventBySlug, gammaMarketByCondition, upDownSlug, parseUpDownSlug, UPDOWN_ASSETS, UPDOWN_TFS, clobBook, clobHistory, polyPositions, polyTrades, polyFeed, deriveClobCreds, buildSignedOrder, postOrder, getOpenOrders, cancelPolyOrder, verifyOrderSignature, limitRawAmounts, marketRawAmounts, walkPrice, roundConfigFor, relayerDeployed, CTF_EXCHANGE_V2, NEG_RISK_EXCHANGE_V2, PUSD, USDC_E, USDC_NATIVE, type PolyEvent, type PolyMarket, type PolyPosition, type PolyOpenOrder, type ClobCreds, type Book } from './lib/polymarket';
 import { hlInfo, hlPostL1, hlApproveAgent, hlOrderWire, hlOrderAction, hlUpdateLeverageAction, hlCancelAction, hlOrderStatusLines, hlAssetId, hlRoundPrice, hlRoundSize, hlEstLiqPx, HL_BRIDGE_ADDRESS, HL_ARBITRUM_USDC, HL_MIN_DEPOSIT_USDC, HL_MIN_ORDER_USD, type HlOrderWire } from './lib/hl';
 import { waveLoadHTML, waveLoadBlockHTML } from './lib/waveload';
 import { celebrateFx, cancelActiveFx, pressPulse, prefersReducedMotion } from './lib/fx';
@@ -634,6 +634,19 @@ function autoLockMin(): number { const v = Number(localStorage.getItem(AUTOLOCK_
 let lastActiveAt = Date.now();
 function touchLock() { lastActiveAt = Date.now(); clearTimeout(lockTimer); lockTimer = setTimeout(() => lock(), autoLockMin() * 60 * 1000); }
 function autoLockOverdue(): boolean { return !!secret && Date.now() - lastActiveAt > autoLockMin() * 60 * 1000; }
+// Audit fix: market cards and the Invest promo card are divs with
+// role="button" + tabindex but only mouse/touch wiring — keyboard and
+// switch users could focus them and Enter/Space did nothing. One
+// delegated handler activates them like a click. Elements with their
+// own keydown (position rows) preventDefault, which skips this.
+document.addEventListener('keydown', (e) => {
+  if (e.defaultPrevented || (e.key !== 'Enter' && e.key !== ' ')) return;
+  const t = e.target as HTMLElement;
+  const el = t?.closest?.('[data-polym], [data-poly-pos], #promoPolyCard') as HTMLElement | null;
+  if (!el || el.tagName === 'BUTTON' || t.closest('button, a, input, textarea, select')) return;
+  e.preventDefault();
+  el.click();
+});
 document.addEventListener('pointerdown', () => { if (autoLockOverdue()) lock(); }, true);
 document.addEventListener('pointerdown', touchLock);
 document.addEventListener('visibilitychange', () => { document.documentElement.classList.toggle('animPaused', document.hidden); if (!document.hidden && autoLockOverdue()) lock(); });
@@ -2051,9 +2064,17 @@ async function loadChart(el: HTMLElement | null, c: Chain, range: string, height
     chartSeriesCache.set(cacheKey, pts);
     renderTickerChart(el, pts, { height });
     clearInterval(chartTimer);
+    const baseLen = pts.length;
     chartTimer = setInterval(async () => {
-      const p = await fetchPrices(); const cur = c.cg ? p?.[c.cg]?.usd : null; if (!cur || !el.isConnected) return;
-      pts.push([Date.now(), cur]); renderTickerChart(el, pts, { height });
+      // Audit fix: the old callback returned forever on a detached
+      // element — the interval leaked for the whole session, polling
+      // prices and growing the series unbounded. Self-clear instead,
+      // and cap the appended live tail.
+      if (!el.isConnected) { clearInterval(chartTimer); return; }
+      const p = await fetchPrices(); const cur = c.cg ? p?.[c.cg]?.usd : null; if (!cur) return;
+      pts.push([Date.now(), cur]);
+      if (pts.length > baseLen + 500) pts.splice(baseLen, pts.length - baseLen - 500);
+      renderTickerChart(el, pts, { height });
     }, 25000);
   };
   // Instant seed, before any await: the in-memory series from a
@@ -2738,6 +2759,22 @@ function showSend(chainId: string, err = '', done = '') {
     d.amt = d.mode === 'usd' ? (p != null ? (ca * p * fxr).toFixed(fiatDec) : '') : trimNum(ca, Math.min(8, c.decimals));
     app().querySelectorAll('#pctChips [data-pct]').forEach(x => x.classList.toggle('on', x === btn));
     updateUI();
+    // Audit fix: MAX (100%) used to fill the FULL balance, leaving
+    // nothing for the network fee — the send then predictably failed
+    // at broadcast after a review screen showing a negative
+    // balance-after. Reserve the estimated fee: once it lands, if the
+    // amount still stands at the full balance, trim it to b − fee.
+    if (pc === 100) {
+      void estimateFee(c).then(fee => {
+        if (fee == null || !(fee > 0) || b == null) return;
+        if (!$('#pctChips')) return; // screen changed
+        if (!(cryptoAmt() >= b * 0.999)) return; // user edited since
+        const maxCa = b - fee;
+        if (!(maxCa > 0)) return;
+        d.amt = d.mode === 'usd' ? (p != null ? (maxCa * p * fxr).toFixed(fiatDec) : '') : trimNum(maxCa, Math.min(8, c.decimals));
+        updateUI();
+      });
+    }
   });
   ($('#assetPick') as HTMLElement).onclick = () => {
     openSendPicker(c.id + ':native', (a) => {
@@ -2957,6 +2994,16 @@ function showSendConfirm(c: Chain, to: string, amtStr: string, err = '', poisonW
     // be silently dropped — when live fee data is unavailable the send
     // BLOCKS instead of falling back to provider defaults.
     if (c.kind === 'evm' && feeState.mode !== 'auto' && !chosenFees(feeState, feeInfo)) { showSendConfirm(c, to, amtStr, 'Live fee data is unavailable, so your chosen fee speed can\'t be applied. Check your connection, or switch the fee back to Auto.', poisonWarn, nameLabel); return; }
+    // Audit fix: never let amount + fee exceed the balance reach the
+    // signer — it could only fail at broadcast. (MAX on step 1 now
+    // reserves the fee; this guards hand-typed full-balance amounts.)
+    const bNow = balances.get(c.id);
+    if (bNow != null) {
+      let feeNow: number | null = null;
+      if (c.kind === 'evm') { const ch = chosenFees(feeState, feeInfo); feeNow = ch ? Number(ethers.formatEther(ch.effPrice * GAS_LIMIT)) : null; }
+      else feeNow = await estimateFee(c);
+      if (feeNow != null && amt + feeNow > bNow) { showSendConfirm(c, to, amtStr, `Amount plus the network fee (~${trimNum(feeNow, 8)} ${c.symbol}) exceeds your balance. Go back and reduce the amount — the MAX shortcut leaves room for the fee.`, poisonWarn, nameLabel); return; }
+    }
     const btn = $('#sendBtn') as HTMLButtonElement; btnBusy(btn, 'Signing & broadcasting…');
     try { const overrides = c.kind === 'evm' ? (chosenFees(feeState, feeInfo)?.overrides || {}) : {}; const hash = await doSend(c, to, amtStr, overrides); recordLocalTx(c.id, hash, `Sent ${c.symbol}`, { dir: 'out', sym: c.symbol, amt: amtStr, cp: to }); recordCounterparty(to); balances.delete(c.id); sendDrafts.delete(c.id);
       celebrate(btn, () => {
@@ -6248,6 +6295,15 @@ function showDiscover() {
 // one, this screen explains exactly that and pairs nothing.
 let wcProposal: any = null;
 let wcRequest: any = null;
+// Audit fix: proposals/requests used to be single slots — a second
+// dApp event while one was open silently overwrote it, and the
+// displaced dApp hung forever with no way to approve or reject it.
+// Events now queue FIFO behind the one on screen; finishing the
+// current one promotes the next.
+const wcProposalQueue: any[] = [];
+const wcRequestQueue: any[] = [];
+function wcAdvanceProposal(): void { wcProposal = wcProposalQueue.shift() ?? null; }
+function wcAdvanceRequest(): void { wcRequest = wcRequestQueue.shift() ?? null; }
 let wcInitState: 'idle' | 'starting' | 'ready' | 'error' = 'idle';
 // Audit fix: the pairing input's draft survives Connect rerenders
 // (session events repaint the screen and used to wipe a half-pasted
@@ -6283,8 +6339,8 @@ async function ensureWc(): Promise<boolean> {
   wcInitState = 'starting'; wcInitErr = '';
   const attempt = ++wcAttempt;
   const p = wcInit(featureCfg.walletConnectProjectId, {
-    onProposal: (p: any) => { wcProposal = p; if (currentRoute === 'connect') showConnect(); },
-    onRequest: (e: any) => { wcRequest = e; if (currentRoute === 'connect') showConnect(); else go({ route: 'connect' }); },
+    onProposal: (p: any) => { if (wcProposal) { wcProposalQueue.push(p); return; } wcProposal = p; if (currentRoute === 'connect') showConnect(); },
+    onRequest: (e: any) => { if (wcRequest) { wcRequestQueue.push(e); return; } wcRequest = e; if (currentRoute === 'connect') showConnect(); else go({ route: 'connect' }); },
     onSessionDelete: () => { if (currentRoute === 'connect') showConnect(); },
   });
   p.then(
@@ -6482,6 +6538,7 @@ let investSection: 'crypto' | 'hl' | 'bstocks' | 'poly' = 'crypto';
 let investNet = 'all';
 let investCat: 'crypto' | 'stocks' | 'commodities' | 'preipo' | 'all' = 'crypto';
 let investQuery = '';
+let investPaintGen = 0; // bumped per paintInvestBody — stale painters bail
 let hlData: { dexes: HlDex[] } | null = null;
 let hlDataAt = 0;
 let gtData = new Map<string, GtPool[]>();
@@ -6655,6 +6712,9 @@ function showInvest() {
   paintInvestPromo();
 }
 function paintInvestBody() {
+  // Audit fix: every keystroke repaints — bump the paint generation
+  // so a slower, older painter can never overwrite a newer one.
+  investPaintGen++;
   const body = $('#invBody'); if (!body || currentRoute !== 'invest') return;
   if (investSection === 'crypto') void paintInvestCrypto(body);
   else if (investSection === 'hl') void paintInvestHl(body);
@@ -6743,6 +6803,7 @@ async function paintSettingsHlAccount(addr: string) {
   host.querySelectorAll('[data-hlclose]').forEach(b => (b as HTMLElement).onclick = () => { const p = (a?.positions || [])[Number((b as HTMLElement).dataset.hlclose)]; if (p) void hlClosePositionFlow(p.coin, p.dex, b as HTMLElement); });
 }
 async function paintInvestCrypto(body: HTMLElement) {
+  const gen = investPaintGen;
   const q = investQuery.trim().toLowerCase();
   const nets = investNet === 'all' ? INVEST_NETS.slice(1) : INVEST_NETS.filter(n => n.id === investNet);
   const chips = `<div class="chipRail">${INVEST_NETS.map(n => `<button class="netChip${investNet === n.id ? ' on' : ''}" data-net="${n.id}"><span>${n.name}</span></button>`).join('')}</div>`;
@@ -6768,6 +6829,7 @@ async function paintInvestCrypto(body: HTMLElement) {
   body.querySelectorAll('[data-token2]').forEach(b => (b as HTMLElement).onclick = () => go({ route: 'token', tokenId: (b as HTMLElement).dataset.token2! }, b as HTMLElement));
   const pools: { net: string; pool: GtPool }[] = [];
   for (const n of nets) for (const p of await loadGt(n.id)) pools.push({ net: n.id, pool: p });
+  if (gen !== investPaintGen) return; // a newer keystroke repaint superseded this one
   const slot = $('#invTrend'); if (!slot || currentRoute !== 'invest' || investSection !== 'crypto') return;
   const seen = new Set<string>();
   const rows = pools.filter(({ pool }) => { const k = pool.address.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return !q || (pool.name + ' ' + pool.symbol).toLowerCase().includes(q); })
@@ -6784,6 +6846,7 @@ function hlRowList(data: { dexes: HlDex[] }): { dex: HlDex; a: HlAsset; cat: str
   return all;
 }
 async function paintInvestHl(body: HTMLElement) {
+  const gen = investPaintGen;
   const cats = [{ id: 'crypto', name: 'Crypto perps' }, { id: 'stocks', name: 'Stocks' }, { id: 'commodities', name: 'Commodities' }, { id: 'preipo', name: 'Pre-IPO' }, { id: 'all', name: 'All markets' }] as const;
   body.innerHTML = `<div class="chipRail">${cats.map(c => `<button class="netChip${investCat === c.id ? ' on' : ''}" data-cat="${c.id}"><span>${c.name}</span></button>`).join('')}</div><div id="invHlList"><div style="padding:6px 16px">${waveLoadBlockHTML()}</div></div>`;
   body.querySelectorAll('[data-cat]').forEach(b => (b as HTMLElement).onclick = () => { investCat = (b as HTMLElement).dataset.cat as typeof investCat; paintInvestBody(); });
@@ -6803,7 +6866,9 @@ async function paintInvestHl(body: HTMLElement) {
     slot.innerHTML = rows.length ? `<div class="iosList homeList" style="margin:0 16px">${rows.map(({ dex, a, cat }) => `<button class="aRow" data-hl="${esc(dex.id)}:${esc(a.name)}">${cat === 'commodities' ? commodityIcon(hlBaseName(a.name), a.name, { sm: true }) : cat === 'stocks' ? stockIcon(hlBaseName(a.name), a.name, { sm: true }) : underlyingIcon(hlBaseName(a.name), a.name, { sm: true })}<span class="aMid"><span class="aName">${esc(hlBaseName(a.name))} <span class="aSym">${dex.id ? esc(dex.name) : 'Hyperliquid'}</span></span><span class="aSub"><span>${fmtPrice(a.markPx)}</span> ${chgPill(a.change24h)}</span></span><span class="aRight"><span class="amt">${fmtMcap(a.dayNtlVlm)}</span><span class="usd">24h volume</span></span><i class="ri-arrow-right-s-line aChev"></i></button>`).join('')}</div>${foot}` : `<p class="small muted secEmpty">${q ? `No live market matches '${esc(investQuery.trim())}'.` : 'No live markets in this category right now.'}</p>${foot}`;
     slot.querySelectorAll('[data-hl]').forEach(b => (b as HTMLElement).onclick = () => { const v = (b as HTMLElement).dataset.hl || ''; const ix = v.indexOf(':'); investHlSel = { dex: v.slice(0, ix), name: v.slice(ix + 1) }; go({ route: 'hlmarket' }, b as HTMLElement); });
   };
-  paintList(await loadHlMarkets());
+  const hlData0 = await loadHlMarkets();
+  if (gen !== investPaintGen) return; // superseded — don't paint or arm a second timer
+  paintList(hlData0);
   // Live refresh while the section is open: values swap in place on
   // the same cadence as the server cache; no loader, no re-layout
   // beyond the rows themselves. Stops the moment the user leaves.
@@ -6909,7 +6974,8 @@ function mmcCardHTML(e: PolyEvent, m: PolyMarket, title: string, letter: string)
 function paintMmcTips(root: HTMLElement) {
   root.querySelectorAll('[data-mmc-cond]').forEach(card => {
     const cond = (card as HTMLElement).dataset.mmcCond || '';
-    if (!cond) return;
+    if (!cond || (card as HTMLElement).dataset.tipsDone) return;
+    (card as HTMLElement).dataset.tipsDone = '1';
     void polyTrades(cond, 25).then(trades => {
       if (!document.body.contains(card)) return;
       const tips = trades.map(t => ({ usd: t.size * t.price, up: (t.side === 'BUY') === (t.outcomeIx === 0) })).filter(t => t.usd >= 1).slice(0, 6);
@@ -6923,18 +6989,67 @@ function paintMmcTips(root: HTMLElement) {
     }).catch(() => { /* tips are ambient — absence is fine */ });
   });
 }
+// ---- Prediction bookmarks ----
+// Device-local like everything else in the wallet: a set of market
+// condition ids in localStorage. Every bookmark button on every card
+// (browse, Up or Down, search, appended pages) and on the market
+// detail reads and writes this one store, so a market shows the same
+// state everywhere and it survives reloads.
+const POLY_BM_KEY = 'syn-wallet-poly-bookmarks';
+let polyBmSet: Set<string> | null = null;
+function polyBookmarks(): Set<string> {
+  if (!polyBmSet) {
+    try { polyBmSet = new Set(JSON.parse(localStorage.getItem(POLY_BM_KEY) || '[]')); } catch { polyBmSet = new Set(); }
+  }
+  return polyBmSet;
+}
+function polyBmToggle(cond: string): boolean {
+  const s = polyBookmarks();
+  const on = !s.has(cond);
+  if (on) s.add(cond); else s.delete(cond);
+  try { localStorage.setItem(POLY_BM_KEY, JSON.stringify([...s])); } catch { /* storage unavailable — state still holds for this session */ }
+  return on;
+}
+function polyBmPaint(root: ParentNode) {
+  root.querySelectorAll('[data-mmc-bookmark]').forEach(b => {
+    const card = (b as HTMLElement).closest('[data-polym]');
+    const cond = card ? (card as HTMLElement).dataset.polym || '' : '';
+    const on = !!cond && polyBookmarks().has(cond);
+    (b as HTMLElement).classList.toggle('on', on);
+    (b as HTMLElement).setAttribute('aria-pressed', String(on));
+  });
+}
 function wireMmcBookmarks(root: HTMLElement) {
-  root.querySelectorAll('[data-mmc-bookmark]').forEach(b => (b as HTMLElement).onclick = (ev) => { ev.stopPropagation(); b.classList.toggle('on'); });
+  root.querySelectorAll('[data-mmc-bookmark]').forEach(b => (b as HTMLElement).onclick = (ev) => {
+    ev.stopPropagation();
+    const card = (b as HTMLElement).closest('[data-polym]');
+    const cond = card ? (card as HTMLElement).dataset.polym || '' : '';
+    if (!cond) return;
+    polyBmToggle(cond);
+    polyBmPaint(document);
+  });
+  polyBmPaint(root);
+}
+function bncCardHTML(e: PolyEvent, m: PolyMarket): string {
+  // The finalized standalone binary card (Satoshi card): same final
+  // language as the event card — orb tile + underlined title, the
+  // orb-button pair instead of pills, quiet footer. NO gauge, NO
+  // floating tips, NO LIVE tag. First outcome gets the orb-tilt slot,
+  // second stays muted; prices live in the labels (data-poly-cents
+  // keeps the first one ticking live).
+  const p = m.prices[0] ?? 0;
+  const p1 = m.prices[1] ?? (1 - p);
+  const letter = (m.question || e.title || '?').trim().charAt(0).toUpperCase();
+  const badge = `${esc(letter)}${e.image ? `<img class="coinImg evcBadgeImg" src="${esc(e.image)}" alt="">` : ''}`;
+  return `<div class="polyCard evcCard strokeLit" data-polym="${esc(m.conditionId)}" role="button" tabindex="0">
+    <div class="evcHead"><span class="evcBadge">${badge}</span><h3 class="evcTitle">${esc(m.question)}</h3></div>
+    <div class="mmcBets"><button class="mmcOrb mmcInteractive strokeLit" data-poly-go="${esc(m.conditionId)}:0"><span class="mmcSlot mmcOrbTilt">${MMC_TREND_UP}</span><span class="mmcLbl">${esc(m.outcomes[0] || 'Yes')} <span data-poly-cents="${esc(m.tokenIds[0] || '')}">${polyCents(p)}</span></span></button><button class="mmcOrb mmcInteractive mmcMuted strokeLit" data-poly-go="${esc(m.conditionId)}:1"><span class="mmcSlot mmcFlat">${MMC_TREND_DOWN}</span><span class="mmcLbl">${esc(m.outcomes[1] || 'No')} <span data-poly-cents="${esc(m.tokenIds[1] || '')}">${polyCents(p1)}</span></span></button></div>
+    <div class="evcFoot"><span class="evcMeta">Polymarket · ${fmtMcap(m.volume)} Vol. · Ends ${polyEnd(m.endDate || e.endDate)}</span><button class="evcBookmark" data-mmc-bookmark aria-label="Bookmark market">${MMC_BOOKMARK}</button></div>
+  </div>`;
 }
 function polyMiniCard(e: PolyEvent, m: PolyMarket): string {
-  const yes = m.prices[0] ?? 0;
-  const ud = isUpDown(m);
-  if (ud) return mmcCardHTML(e, m, m.question, (e.title || '?').trim().charAt(0).toUpperCase());
-  return `<div class="polyCard${ud ? ' fillPanel strokeLit' : ''}" data-polym="${esc(m.conditionId)}" role="button" tabindex="0">
-    <div class="polyCardTop">${e.image ? `<span class="polyEvIc"><img class="coinImg" src="${esc(e.image)}" alt=""></span>` : ''}<span class="polyQ">${esc(m.question)}</span><span class="polyGaugeWrap">${polyGaugeSVG(yes, ud ? '#3ddc84' : undefined)}<span class="polyGaugePct" data-poly-price="${esc(m.tokenIds[0] || '')}">${polyPct(yes)}</span>${ud ? `<span class="polyGaugeLbl">${esc(m.outcomes[0])}</span>` : ''}</span></div>
-    ${ud ? polyOrbPills(m) : `<div class="polyPills"><button class="polyPill yes" data-poly-go="${esc(m.conditionId)}:0">${esc(m.outcomes[0] || 'Yes')} ${polyCents(yes)}</button><button class="polyPill no" data-poly-go="${esc(m.conditionId)}:1">${esc(m.outcomes[1] || 'No')} ${polyCents(m.prices[1] ?? (1 - yes))}</button></div>`}
-    <div class="polyCardFoot"><span>${fmtMcap(m.volume)} Vol.</span><span>Ends ${polyEnd(m.endDate || e.endDate)}</span></div>
-  </div>`;
+  if (isUpDown(m)) return mmcCardHTML(e, m, m.question, (e.title || '?').trim().charAt(0).toUpperCase());
+  return bncCardHTML(e, m);
 }
 function polyMatchCard(e: PolyEvent, m: PolyMarket): string {
   const [t1, t2] = e.title.split(/\s+vs\.?\s+/i);
@@ -6942,18 +7057,25 @@ function polyMatchCard(e: PolyEvent, m: PolyMarket): string {
   return `<div class="polyCard" data-polym="${esc(m.conditionId)}" role="button" tabindex="0">
     ${row(0, t1)}${row(1, t2)}
     <div class="polyPills"><button class="polyPill yes" data-poly-go="${esc(m.conditionId)}:0">${esc(t1 || m.outcomes[0] || '')}</button><button class="polyPill no" data-poly-go="${esc(m.conditionId)}:1">${esc(t2 || m.outcomes[1] || '')}</button></div>
-    <div class="polyCardFoot"><span class="polyLiveTag"><span class="liveDotSm"></span>Sports</span><span>${fmtMcap(m.volume)} Vol.</span><span>Ends ${polyEnd(m.endDate || e.endDate)}</span></div>
+    <div class="polyCardFoot"><span class="polyLiveTag"><span class="liveDotSm"></span>Sports</span><span>${fmtMcap(m.volume)} Vol.</span><span>Ends ${polyEnd(m.endDate || e.endDate)}</span><button class="evcBookmark" data-mmc-bookmark aria-label="Bookmark market">${MMC_BOOKMARK}</button></div>
   </div>`;
 }
 function polyEventCard(e: PolyEvent): string {
+  // The finalized standalone event card (mini-market language, per
+  // Penta's edit of the Trail Blazers vs. Knicks card): fill-panel +
+  // stroke-lit, orb tile with the event's real image, underlined
+  // title, silver-bar outcome rows, quiet footer. NO gauge, NO
+  // floating tips, NO LIVE tag on this card type.
   const rows = e.markets.slice().sort((a, b) => (b.prices[0] ?? 0) - (a.prices[0] ?? 0)).slice(0, 4).map(m => {
     const p = m.prices[0] ?? 0;
-    return `<button class="polyOutRow" data-poly-go="${esc(m.conditionId)}:0"><span class="polyOutLbl">${esc(m.outcomes[0] && m.outcomes[0] !== 'Yes' ? m.question : (m.question.replace(/^Will\s+/i, '').slice(0, 44)))}</span><span class="polyOutBar"><span style="width:${Math.round(p * 100)}%"></span></span><span class="polyOutPct" data-poly-price="${esc(m.tokenIds[0] || '')}">${polyPct(p)}</span></button>`;
+    return `<button class="evcRow" data-poly-go="${esc(m.conditionId)}:0"><span class="evcLbl">${esc(m.outcomes[0] && m.outcomes[0] !== 'Yes' ? m.question : (m.question.replace(/^Will\s+/i, '').slice(0, 44)))}</span><span class="evcBar"><span style="width:${Math.round(p * 100)}%"></span></span><span class="evcPct" data-poly-price="${esc(m.tokenIds[0] || '')}">${polyPct(p)}</span></button>`;
   }).join('');
-  return `<div class="polyCard" data-polym="${esc(e.markets[0]?.conditionId || '')}">
-    <div class="polyCardTop">${e.image ? `<span class="polyEvIc"><img class="coinImg" src="${esc(e.image)}" alt=""></span>` : ''}<span class="polyQ">${esc(e.title)}</span></div>
-    <div class="polyOutRows">${rows}</div>
-    <div class="polyCardFoot"><span>${fmtMcap(e.volume)} Vol.</span><span>${e.markets.length} markets</span><span>Ends ${polyEnd(e.endDate)}</span></div>
+  const letter = (e.title || '?').trim().charAt(0).toUpperCase();
+  const badge = `${esc(letter)}${e.image ? `<img class="coinImg evcBadgeImg" src="${esc(e.image)}" alt="">` : ''}`;
+  return `<div class="polyCard evcCard strokeLit" data-polym="${esc(e.markets[0]?.conditionId || '')}" role="button" tabindex="0">
+    <div class="evcHead"><span class="evcBadge">${badge}</span><h3 class="evcTitle">${esc(e.title)}</h3></div>
+    <div class="evcRows">${rows}</div>
+    <div class="evcFoot"><span class="evcMeta">Polymarket · ${fmtMcap(e.volume)} Vol. · ${e.markets.length} markets · Ends ${polyEnd(e.endDate)}</span><button class="evcBookmark" data-mmc-bookmark aria-label="Bookmark market">${MMC_BOOKMARK}</button></div>
   </div>`;
 }
 function polyCardFor(e: PolyEvent): string {
@@ -7116,22 +7238,51 @@ async function paintInvestPoly(body: HTMLElement) {
     slot.classList.toggle('fxOn', fx);
     const cnt = (v: number, kind: string): string => first ? ` data-pcount="${v}" data-pkind="${kind}"` : '';
     slot.innerHTML = `<div class="secHead" style="padding:2px 16px 6px"><span class="secTitle">Your positions</span><span class="polyPosTot"><span class="polyPosTotal"${cnt(total, 'usd')}>${fmtUsd(total)}</span><span class="polyPosNet ${net >= 0 ? 'pos' : 'neg'}"${cnt(net, 'pnl')}>${net >= 0 ? '+' : '−'}${fmtUsd(Math.abs(net))}</span></span></div>
-      <div style="padding:0 16px;display:flex;flex-direction:column;gap:8px">${ps.slice(0, 12).map((p, i) => `<div class="polyPosRow" style="--i:${i}"><span class="polySheen" aria-hidden="true"></span>${polyPosIconHTML(p)}<span class="polyPosTx"><span class="polyPosT">${esc(p.title)}</span><span class="polyPosS">${esc(p.outcome)} · ${trimNum(p.size, 2)} shares @ ${polyCents(p.avgPrice)}</span></span><span class="polyPosVal"><span${cnt(p.currentValue, 'usd')}>${fmtUsd(p.currentValue)}</span><span class="${p.cashPnl >= 0 ? 'pos' : 'neg'}"${cnt(p.cashPnl, 'pnl')}>${p.cashPnl >= 0 ? '+' : '−'}${fmtUsd(Math.abs(p.cashPnl))}</span></span></div>`).join('')}</div>${ps.length > 12 ? `<p class="small muted" style="padding:8px 16px 0">Showing 12 of ${ps.length} positions — the totals above include all of them.</p>` : ''}`;
+      <div style="padding:0 16px;display:flex;flex-direction:column;gap:8px">${ps.slice(0, 50).map((p, i) => `<div class="polyPosRow" style="--i:${i}" role="button" tabindex="0" data-poly-pos="${esc(p.conditionId)}:${esc(p.asset)}"><span class="polySheen" aria-hidden="true"></span>${polyPosIconHTML(p)}<span class="polyPosTx"><span class="polyPosT">${esc(p.title)}</span><span class="polyPosS">${esc(p.outcome)} · ${trimNum(p.size, 2)} shares @ ${polyCents(p.avgPrice)}</span></span><span class="polyPosVal"><span${cnt(p.currentValue, 'usd')}>${fmtUsd(p.currentValue)}</span><span class="${p.cashPnl >= 0 ? 'pos' : 'neg'}"${cnt(p.cashPnl, 'pnl')}>${p.cashPnl >= 0 ? '+' : '−'}${fmtUsd(Math.abs(p.cashPnl))}</span></span></div>`).join('')}</div>${ps.length > 50 ? `<p class="small muted" style="padding:8px 16px 0">Showing 50 of ${ps.length} positions — the totals above include all of them.</p>` : ''}`;
     if (first) slot.querySelectorAll('[data-pcount]').forEach(el => polyCountUp(el as HTMLElement));
+    // Audit fix: position rows were dead — no market id, no wiring.
+    // A tap now opens that market's detail (outcome side = the
+    // position's own token), like every other market card.
+    let posBusy = false;
+    const openPos = async (row: HTMLElement) => {
+      if (posBusy) return;
+      const [cond, asset] = (row.dataset.polyPos || '').split(':');
+      if (!cond) return;
+      posBusy = true;
+      try {
+        const m = await gammaMarketByCondition(cond);
+        if (!m) return;
+        const ix = Math.max(0, m.tokenIds.indexOf(asset));
+        polySel = { market: m, eventTitle: m.question, outcomeIx: ix };
+        go({ route: 'polymarket' }, row);
+      } catch { /* stay on the list — the row can be tapped again */ }
+      finally { posBusy = false; }
+    };
+    slot.querySelectorAll('[data-poly-pos]').forEach(row => {
+      const el = row as HTMLElement;
+      el.onclick = () => void openPos(el);
+      el.onkeydown = (e: KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void openPos(el); } };
+    });
   }).catch(() => {
     // Audit fix: a failed positions read must not look identical to
     // holding nothing — say so in the slot instead of leaving it blank.
     const slot = $('#polyPositions'); if (!slot || currentRoute !== 'invest' || investSection !== 'poly') return;
     if (!slot.innerHTML) slot.innerHTML = '<p class="small muted" style="padding:2px 16px 6px">Your positions couldn’t load right now — reopen this tab to retry.</p>';
   });
-  const paintUpDown = async () => {
+  const paintUpDown = async (refresh = false) => {
     polyListCleanup();
     const slot = $('#polyList'); if (!slot || currentRoute !== 'invest' || investSection !== 'poly') return;
     const note = $('#polyNote'); if (note) note.innerHTML = '';
     const chips = `<div class="polyCats" style="padding-top:2px">${UPDOWN_TFS.map(t => `<button class="polyCat${t.secs === polyUpTf ? ' on' : ''}" data-udtf="${t.secs}"><span>${t.id}</span></button>`).join('')}</div>`;
     const wireChips = () => slot.querySelectorAll('[data-udtf]').forEach(b => (b as HTMLElement).onclick = () => { polyUpTf = Number((b as HTMLElement).dataset.udtf) || 300; void paintUpDown(); });
-    slot.innerHTML = chips + `<div style="padding:6px 16px">${waveLoadBlockHTML('Loading…', true)}</div>`;
-    wireChips();
+    // Audit fix (invisible updates): a window-rollover refresh must
+    // not blank the live cards behind a loading block — keep the
+    // current cards on screen and swap them when the new window's
+    // data lands. The loader is only for the first paint / chip taps.
+    if (!(refresh && slot.querySelector('.polyGrid'))) {
+      slot.innerHTML = chips + `<div style="padding:6px 16px">${waveLoadBlockHTML('Loading…', true)}</div>`;
+      wireChips();
+    }
     const tf = UPDOWN_TFS.find(t => t.secs === polyUpTf) || UPDOWN_TFS[0];
     const evs = await Promise.all(UPDOWN_ASSETS.map(a => gammaEventBySlug(upDownSlug(a.slug, polyUpTf)).catch(() => null)));
     if (!document.body.contains(slot) || currentRoute !== 'invest' || investSection !== 'poly' || polyCat !== 'updown') return;
@@ -7160,7 +7311,7 @@ async function paintInvestPoly(body: HTMLElement) {
       const now = Date.now();
       let rolled = false;
       slot.querySelectorAll('[data-ud-end]').forEach(el => { const end = Number((el as HTMLElement).dataset.udEnd); const left = end - now; (el as HTMLElement).textContent = left > 0 ? 'Ends in ' + fmtUdCountdown(left) : 'Ending…'; if (left <= 0) rolled = true; });
-      if (rolled && !rolling) { rolling = true; void paintUpDown(); }
+      if (rolled && !rolling) { rolling = true; void paintUpDown(true); }
     }, 1000);
   };
   const load = async () => {
@@ -7169,15 +7320,56 @@ async function paintInvestPoly(body: HTMLElement) {
     const q = investQuery.trim();
     if (polyCat === 'updown' && q.length < 2) { await paintUpDown(); return; }
     const key = q.length >= 2 ? 'q:' + q.toLowerCase() : 'tag:' + polyCat;
+    const PAGE = 100; // Gamma's max page — categories hold far more than the old single page of 24.
     const render = (events: PolyEvent[]) => {
       polyLastRendered = events;
+      const all = [...events];
       slot.innerHTML = `<div class="polyGrid">${events.map(polyCardFor).join('')}</div>`;
-      const byCond = new Map<string, { e: PolyEvent; m: PolyMarket }>();
-      for (const e of events) for (const m of e.markets) byCond.set(m.conditionId, { e, m });
-      slot.querySelectorAll('[data-poly-go]').forEach(b => (b as HTMLElement).onclick = (ev) => { ev.stopPropagation(); const [cond, ix] = ((b as HTMLElement).dataset.polyGo || '').split(':'); const hit = byCond.get(cond); if (hit) { polySel = { market: hit.m, eventTitle: hit.e.title, outcomeIx: Number(ix) || 0 }; go({ route: 'polymarket' }, b as HTMLElement); } });
-      slot.querySelectorAll('[data-polym]').forEach(card => (card as HTMLElement).onclick = () => { const hit = byCond.get((card as HTMLElement).dataset.polym!); if (hit) { polySel = { market: hit.m, eventTitle: hit.e.title, outcomeIx: 0 }; go({ route: 'polymarket' }, card as HTMLElement); } });
-      wireMmcBookmarks(slot);
-      paintMmcTips(slot);
+      // (Re)binds every card in the grid from the accumulated list —
+      // onclick assignment is idempotent, so Show more can re-run it
+      // after appending a page.
+      const wireCards = () => {
+        const byCond = new Map<string, { e: PolyEvent; m: PolyMarket }>();
+        for (const e of all) for (const m of e.markets) byCond.set(m.conditionId, { e, m });
+        slot.querySelectorAll('[data-poly-go]').forEach(b => (b as HTMLElement).onclick = (ev) => { ev.stopPropagation(); const [cond, ix] = ((b as HTMLElement).dataset.polyGo || '').split(':'); const hit = byCond.get(cond); if (hit) { polySel = { market: hit.m, eventTitle: hit.e.title, outcomeIx: Number(ix) || 0 }; go({ route: 'polymarket' }, b as HTMLElement); } });
+        slot.querySelectorAll('[data-polym]').forEach(card => (card as HTMLElement).onclick = () => { const hit = byCond.get((card as HTMLElement).dataset.polym!); if (hit) { polySel = { market: hit.m, eventTitle: hit.e.title, outcomeIx: 0 }; go({ route: 'polymarket' }, card as HTMLElement); } });
+        wireMmcBookmarks(slot);
+        paintMmcTips(slot);
+      };
+      wireCards();
+      // Show more: categories page through Gamma at 100 a page until
+      // a short page says the list is exhausted.
+      if (q.length < 2 && events.length >= PAGE) {
+        const wrap = document.createElement('div');
+        wrap.className = 'polyMoreWrap';
+        wrap.innerHTML = '<button class="btnGhost polyMoreBtn" type="button">Show more markets</button>';
+        slot.appendChild(wrap);
+        const btn = wrap.querySelector('button') as HTMLButtonElement;
+        const shownIds = new Set(all.map(e => e.id));
+        let offset = PAGE;
+        let busy = false;
+        btn.onclick = async () => {
+          if (busy) return;
+          busy = true;
+          btn.textContent = 'Loading…';
+          try {
+            const pageEvts = await gammaEvents({ tag: polyCat === 'trending' ? undefined : polyCat, limit: PAGE, offset });
+            offset += PAGE;
+            const fresh = pageEvts.filter(e => !shownIds.has(e.id));
+            if (fresh.length) {
+              for (const e of fresh) { shownIds.add(e.id); all.push(e); }
+              const grid = slot.querySelector('.polyGrid');
+              if (grid) grid.insertAdjacentHTML('beforeend', fresh.map(polyCardFor).join(''));
+              polyLastRendered = all;
+              polyListMem.set(key, all);
+              wireCards();
+            }
+            if (pageEvts.length < PAGE || !fresh.length) { wrap.remove(); return; }
+            btn.textContent = 'Show more markets';
+          } catch { btn.textContent = 'Couldn’t load more — tap to retry'; }
+          busy = false;
+        };
+      }
       if (slot.querySelector('[data-ud-end]')) {
         polyUdTimer = setInterval(() => {
           if (!document.body.contains(slot)) { if (polyUdTimer) { clearInterval(polyUdTimer); polyUdTimer = null; } return; }
@@ -7197,7 +7389,7 @@ async function paintInvestPoly(body: HTMLElement) {
       }));
     };
     try {
-      let events = await gammaEvents(q.length >= 2 ? { search: q } : { tag: polyCat === 'trending' ? undefined : polyCat, limit: 24 });
+      let events = await gammaEvents(q.length >= 2 ? { search: q } : { tag: polyCat === 'trending' ? undefined : polyCat, limit: PAGE });
       if (!document.body.contains(slot)) return;
       // The live Bitcoin Up or Down window leads the popular list.
       if (polyCat === 'trending' && q.length < 2) {
@@ -7461,7 +7653,11 @@ function showPolyMarket() {
     const evUrl = 'https://polymarket.com/event/' + (m.slug || '');
     const cp = $('#ltCopy'); if (cp) cp.onclick = (e) => { void copyText(evUrl, e.currentTarget as HTMLElement); };
     const em = $('#ltEmbed'); if (em) em.onclick = (e) => { void copyText(`<iframe src="${evUrl}" width="400" height="200" frameborder="0"></iframe>`, e.currentTarget as HTMLElement); };
-    const bm = $('#ltBookmark'); if (bm) bm.onclick = () => { const on = bm.classList.toggle('on'); bm.setAttribute('aria-pressed', String(on)); };
+    const bm = $('#ltBookmark'); if (bm) {
+      const paintBm = () => { const on = polyBookmarks().has(m.conditionId); bm.classList.toggle('on', on); bm.setAttribute('aria-pressed', String(on)); };
+      paintBm();
+      bm.onclick = () => { polyBmToggle(m.conditionId); paintBm(); };
+    }
     ltPaint();
   }
   const tokenOf = (ix: number) => m.tokenIds[ix] || '';
@@ -8540,17 +8736,17 @@ function showConnect(err = '') {
     if (pb.isConnected) { pb.disabled = false; pb.innerHTML = 'Pair'; }
   };
   if (prop) {
-    const ab = $('#wcApproveBtn'); if (ab) ab.onclick = async () => { try { const built = buildNamespaces(prop, wcAccounts()); await wcApprove(prop.id, built.namespaces); wcProposal = null; showConnect(); } catch (ex: any) { showConnect('Approve failed: ' + (ex?.message || String(ex))); } };
-    const rb = $('#wcRejectBtn'); if (rb) rb.onclick = async () => { try { await wcReject(prop.id); } catch { /* already gone */ } wcProposal = null; showConnect(); };
+    const ab = $('#wcApproveBtn'); if (ab) ab.onclick = async () => { try { const built = buildNamespaces(prop, wcAccounts()); await wcApprove(prop.id, built.namespaces); wcAdvanceProposal(); showConnect(); } catch (ex: any) { showConnect('Approve failed: ' + (ex?.message || String(ex))); } };
+    const rb = $('#wcRejectBtn'); if (rb) rb.onclick = async () => { try { await wcReject(prop.id); } catch { /* already gone */ } wcAdvanceProposal(); showConnect(); };
   }
   if (wcRequest) {
     const req = wcRequest;
     const ok = $('#wcReqOk'); if (ok) ok.onclick = async () => {
       const btn = ok as HTMLButtonElement; btnBusy(btn, 'Signing…');
-      try { const result = await executeWcRequest(req); await wcRespond(req.topic, req.id, result); wcRequest = null; showConnect(); }
+      try { const result = await executeWcRequest(req); await wcRespond(req.topic, req.id, result); wcAdvanceRequest(); showConnect(); }
       catch (ex: any) { const e = $('#wcReqErr'); if (e) e.innerHTML = `<div class="err">${esc(ex?.message || String(ex))}</div>`; btn.disabled = false; btn.textContent = 'Approve & sign'; }
     };
-    const no = $('#wcReqNo'); if (no) no.onclick = async () => { try { await wcRejectRequest(req.topic, req.id); } catch { /* already gone */ } wcRequest = null; showConnect(); };
+    const no = $('#wcReqNo'); if (no) no.onclick = async () => { try { await wcRejectRequest(req.topic, req.id); } catch { /* already gone */ } wcAdvanceRequest(); showConnect(); };
   }
   document.querySelectorAll('[data-disc]').forEach(b => (b as HTMLElement).onclick = async () => { try { await wcDisconnect((b as HTMLElement).dataset.disc!); } catch { /* already gone */ } showConnect(); });
 }

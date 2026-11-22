@@ -147,17 +147,26 @@ export async function gammaEventBySlug(slug: string): Promise<PolyEvent | null> 
   return evs[0] ?? null;
 }
 
-export async function gammaEvents(params: { tag?: string; search?: string; limit?: number }): Promise<PolyEvent[]> {
+/** One market by condition id — used to open a position's detail. */
+export async function gammaMarketByCondition(conditionId: string): Promise<PolyMarket | null> {
+  const p = `/markets?condition_ids=${encodeURIComponent(conditionId)}`;
+  const j = await fetchJson(GAMMA + p, gammaProxy(p));
+  const ms = (Array.isArray(j) ? j : []).map(parseMarket).filter((m: PolyMarket) => m.tokenIds.length);
+  return ms[0] ?? null;
+}
+
+export async function gammaEvents(params: { tag?: string; search?: string; limit?: number; offset?: number }): Promise<PolyEvent[]> {
   const limit = params.limit || 24;
+  const offset = params.offset || 0;
   if (params.search) {
     // Gamma's public search returns events with nested markets.
     // (The endpoint is /public-search?q= — the older /search path 404s.)
-    const p = `/public-search?q=${encodeURIComponent(params.search)}&limit_per_type=12&events_status=active`;
+    const p = `/public-search?q=${encodeURIComponent(params.search)}&limit_per_type=25&events_status=active`;
     const j = await fetchJson(GAMMA + p, gammaProxy(p));
     const evs = Array.isArray(j?.events) ? j.events : [];
     return evs.map(parseEvent).filter((e: PolyEvent) => e.markets.length);
   }
-  const qs = `active=true&closed=false&archived=false&limit=${limit}&offset=0&order=volume24hr&ascending=false&exclude_tag_id=102169${params.tag ? '&tag_slug=' + encodeURIComponent(params.tag) : ''}`;
+  const qs = `active=true&closed=false&archived=false&limit=${limit}&offset=${offset}&order=volume24hr&ascending=false&exclude_tag_id=102169${params.tag ? '&tag_slug=' + encodeURIComponent(params.tag) : ''}`;
   const p = `/events?${qs}`;
   const j = await fetchJson(GAMMA + p, gammaProxy(p));
   return (Array.isArray(j) ? j : []).map(parseEvent).filter(e => e.markets.length);
