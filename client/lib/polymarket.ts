@@ -45,7 +45,7 @@ export interface PolyMarket {
   id: string; question: string; conditionId: string; slug: string;
   outcomes: string[]; prices: number[]; tokenIds: string[];
   volume: number; volume24hr: number; liquidity: number;
-  endDate: string; negRisk: boolean; tickSize: number; minSize: number;
+  endDate: string; negRisk: boolean; tickSize: number; minSize: number; closed: boolean;
   bestBid: number; bestAsk: number; lastTrade: number; spread: number;
   acceptingOrders: boolean; image: string;
 }
@@ -72,7 +72,7 @@ export function parseMarket(m: any): PolyMarket {
     id: String(m?.id || ''), question: String(m?.question || ''), conditionId: String(m?.conditionId || ''), slug: String(m?.slug || ''),
     outcomes, prices, tokenIds,
     volume: num(m?.volumeNum ?? m?.volume), volume24hr: num(m?.volume24hr), liquidity: num(m?.liquidityNum ?? m?.liquidity),
-    endDate: String(m?.endDate || ''), negRisk: !!m?.negRisk, tickSize: num(m?.orderPriceMinTickSize, 0.01) || 0.01, minSize: num(m?.orderMinSize, 5),
+    endDate: String(m?.endDate || ''), negRisk: !!m?.negRisk, tickSize: num(m?.orderPriceMinTickSize, 0.01) || 0.01, minSize: num(m?.orderMinSize, 5), closed: !!m?.closed,
     bestBid: num(m?.bestBid), bestAsk: num(m?.bestAsk), lastTrade: num(m?.lastTradePrice), spread: num(m?.spread),
     acceptingOrders: m?.acceptingOrders !== false && !!m?.enableOrderBook, image: String(m?.image || m?.icon || ''),
   };
@@ -172,6 +172,15 @@ export async function clobHistory(tokenId: string, interval = '1d', fidelity = 5
   const j = await fetchJson(`${CLOB}/prices-history?market=${tokenId}&interval=${interval}&fidelity=${fidelity}`, `/api/poly/history?token_id=${tokenId}&interval=${interval}&fidelity=${fidelity}`);
   const h = Array.isArray(j?.history) ? j.history : [];
   return h.map((x: any) => ({ t: num(x?.t) * 1000, p: num(x?.p) })).filter((x: { t: number; p: number }) => x.t > 0 && x.p >= 0);
+}
+export interface PolyTrade { side: string; outcomeIx: number; size: number; price: number; ts: number }
+export async function polyTrades(conditionId: string, limit = 25): Promise<PolyTrade[]> {
+  const j = await fetchJson('', '/api/poly/trades?condition=' + encodeURIComponent(conditionId) + '&limit=' + limit);
+  const arr = Array.isArray(j) ? j : Array.isArray(j?.data) ? j.data : [];
+  return arr.map((t: any) => ({
+    side: String(t?.side || ''), outcomeIx: Number(t?.outcome_index ?? t?.outcomeIndex ?? 0),
+    size: num(t?.size), price: num(t?.price), ts: Number(t?.timestamp) || 0,
+  })).filter((t: PolyTrade) => t.size > 0 && t.price > 0);
 }
 export async function polyPositions(user: string): Promise<PolyPosition[]> {
   // Data API v2 (v1 was retired by Polymarket): envelope {data:[…]},

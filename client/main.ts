@@ -17,7 +17,7 @@ import { renderTickerChart, fmtUsd, fmtPrice, priceDp } from './lib/chart';
 import { CURRENCIES, currencyCode, currencySymbol, convertUsd, setCurrency, fetchFxRates, fxRateFor, effectiveCode, currencyDecimals } from './lib/currency';
 import { chainIcon, tokenIcon, chainIconUrl, tokenIconUrl, iconHTML, stackIconHTML, underlyingIcon, underlyingIconUrl, commodityIcon, stockIcon } from './lib/icons';
 import { TOKEN_CATALOG, POPULAR_TOKEN_IDS } from './lib/token-catalog';
-import { gammaEvents, gammaEventBySlug, upDownSlug, parseUpDownSlug, UPDOWN_ASSETS, UPDOWN_TFS, clobBook, clobHistory, polyPositions, polyFeed, deriveClobCreds, buildSignedOrder, postOrder, getOpenOrders, cancelPolyOrder, verifyOrderSignature, limitRawAmounts, marketRawAmounts, walkPrice, roundConfigFor, relayerDeployed, CTF_EXCHANGE_V2, NEG_RISK_EXCHANGE_V2, PUSD, USDC_E, USDC_NATIVE, type PolyEvent, type PolyMarket, type PolyPosition, type PolyOpenOrder, type ClobCreds, type Book } from './lib/polymarket';
+import { gammaEvents, gammaEventBySlug, upDownSlug, parseUpDownSlug, UPDOWN_ASSETS, UPDOWN_TFS, clobBook, clobHistory, polyPositions, polyTrades, polyFeed, deriveClobCreds, buildSignedOrder, postOrder, getOpenOrders, cancelPolyOrder, verifyOrderSignature, limitRawAmounts, marketRawAmounts, walkPrice, roundConfigFor, relayerDeployed, CTF_EXCHANGE_V2, NEG_RISK_EXCHANGE_V2, PUSD, USDC_E, USDC_NATIVE, type PolyEvent, type PolyMarket, type PolyPosition, type PolyOpenOrder, type ClobCreds, type Book } from './lib/polymarket';
 import { hlInfo, hlPostL1, hlApproveAgent, hlOrderWire, hlOrderAction, hlUpdateLeverageAction, hlCancelAction, hlOrderStatusLines, hlAssetId, hlRoundPrice, hlRoundSize, hlEstLiqPx, HL_BRIDGE_ADDRESS, HL_ARBITRUM_USDC, HL_MIN_DEPOSIT_USDC, HL_MIN_ORDER_USD, type HlOrderWire } from './lib/hl';
 import { waveLoadHTML, waveLoadBlockHTML } from './lib/waveload';
 import { celebrateFx, cancelActiveFx, pressPulse, prefersReducedMotion } from './lib/fx';
@@ -6642,9 +6642,9 @@ function showInvest() {
   <div id="invPromo"></div>
   <div class="chipRail" id="invSections">
     <button class="netChip${investSection === 'crypto' ? ' on' : ''}" data-sec="crypto"><i class="ri-coins-line"></i><span>Crypto</span></button>
+    <button class="netChip${investSection === 'poly' ? ' on' : ''}" data-sec="poly"><i class="ri-line-chart-line"></i><span>Prediction</span></button>
     <button class="netChip${investSection === 'hl' ? ' on' : ''}" data-sec="hl"><i class="ri-line-chart-line"></i><span>Hyperliquid</span></button>
     <button class="netChip${investSection === 'bstocks' ? ' on' : ''}" data-sec="bstocks"><i class="ri-building-line"></i><span>bStocks</span></button>
-    <button class="netChip${investSection === 'poly' ? ' on' : ''}" data-sec="poly"><i class="ri-line-chart-line"></i><span>Prediction</span></button>
   </div>
   <div class="sheetSearch" style="margin:2px 16px 10px"><i class="ri-search-line"></i><input id="invSearch" placeholder="Search markets" autocomplete="off" autocapitalize="none" spellcheck="false" value="${esc(investQuery)}"></div>
   <div id="invBody"></div></main>`);
@@ -6878,9 +6878,58 @@ const isUpDown = (m: PolyMarket): boolean => m.outcomes.length === 2 && /^up$/i.
 function polyOrbPills(m: PolyMarket): string {
   return `<div class="polyPills">${m.outcomes.map((o, ix) => `<button class="orbBtn fillAction strokeLit${ix === 1 ? ' dim' : ''}" data-poly-go="${esc(m.conditionId)}:${ix}"><span class="orbSlot${ix === 0 ? ' orbBg' : ''}"><i class="${ix === 0 ? 'ri-arrow-right-up-line' : 'ri-arrow-right-down-line'}"></i></span><span class="orbLbl">${esc(o)} ${polyCents(m.prices[ix] ?? (ix === 0 ? 0 : 1 - (m.prices[0] ?? 0)))}</span></button>`).join('')}</div>`;
 }
+// ---- Mini market card (Up or Down browse cards) ----
+// The standalone mini-market-card component, ported exactly: orb
+// badge, underlined title, semicircle gauge, floating tips, orb
+// buttons, LIVE footer. The tips are REAL recent trades for the
+// market (Data API v2 via /api/poly/trades): the notional of each
+// recent trade ≥ $1, coloured by which outcome the money moved
+// toward; slots without a real trade stay empty.
+const UD_COIN_LOGOS: Record<string, string> = { btc: '/assets/coins/bitcoin.png', eth: '/assets/coins/ethereum.png', sol: '/assets/coins/solana.png', xrp: '/assets/coins/xrp.png' };
+const MMC_TIP_DELAYS = [0, -1300, -600, -2500, -1900, -3100];
+const MMC_TIP_OP = ['o70', 'o70', 'o80', 'o50', 'o50', 'o80'];
+const MMC_TREND_UP = '<svg viewBox="0 0 256 256" fill="currentColor" style="color:#fff"><path d="M232,56v64a8,8,0,0,1-16,0V75.31l-82.34,82.35a8,8,0,0,1-11.31,0L76.69,112,28.34,160.34a8,8,0,0,1-11.31-11.31l54-54a8,8,0,0,1,11.31,0L128,140.69,192.69,76H168a8,8,0,0,1,0-16h56A8,8,0,0,1,232,56Z"/></svg>';
+const MMC_TREND_DOWN = '<svg viewBox="0 0 256 256" fill="currentColor" style="color:rgba(245,245,245,.7)"><path d="M232,200a8,8,0,0,1-8,8H168a8,8,0,0,1,0-16h24.69L128,127.31,82.34,172.69a8,8,0,0,1-11.31,0l-54-54A8,8,0,0,1,28.34,107.66L76.69,156l39.65-39.66a8,8,0,0,1,11.31,0L216,204.69V180a8,8,0,0,1,16,0Z"/></svg>';
+const MMC_BOOKMARK = '<svg viewBox="0 0 256 256"><path d="M192,40V216l-64-39.48L64,216V40a8,8,0,0,1,8-8h112A8,8,0,0,1,192,40Z" fill="none" stroke="currentColor" stroke-width="16"/></svg>';
+function mmcCardHTML(e: PolyEvent, m: PolyMarket, title: string, letter: string): string {
+  const p = m.prices[0] ?? 0;
+  const p1 = m.prices[1] ?? (1 - p);
+  const endMs = Date.parse(m.endDate || e.endDate);
+  const asset = parseUpDownSlug(m.slug)?.asset || '';
+  const logo = UD_COIN_LOGOS[asset] || '';
+  const badge = `${esc(letter || '?')}${logo ? `<img class="coinImg mmcBadgeImg" src="${logo}" alt="">` : ''}`;
+  return `<div class="polyCard mmcCard strokeLit" data-polym="${esc(m.conditionId)}" data-mmc-cond="${esc(m.conditionId)}" role="button" tabindex="0">
+    <div class="mmcHeader"><span class="mmcBadge">${badge}</span><h3 class="mmcTitle">${esc(title)}</h3><div class="mmcGauge"><svg viewBox="0 0 48 26" fill="none" aria-hidden="true"><path d="M5 24A19 19 0 0 1 43 24" stroke="#1c1c1c" stroke-width="4" stroke-linecap="round"/><path d="M5 24A19 19 0 0 1 43 24" stroke="#34d399" stroke-width="4" stroke-linecap="round" stroke-dasharray="${(p * 59.69).toFixed(2)} 59.69"/></svg><div class="mmcGaugePct" data-poly-price="${esc(m.tokenIds[0] || '')}">${polyPct(p)}</div><div class="mmcGaugeLbl">${esc(m.outcomes[0] || 'Up')}</div></div></div>
+    <div class="mmcTipsTop"><span data-tip="0"></span><span data-tip="1"></span></div>
+    <div class="mmcBets"><button class="mmcOrb mmcInteractive strokeLit" data-poly-go="${esc(m.conditionId)}:0"><span class="mmcSlot mmcOrbTilt">${MMC_TREND_UP}</span><span class="mmcLbl">${esc(m.outcomes[0] || 'Up')} <span data-poly-cents="${esc(m.tokenIds[0] || '')}">${polyCents(p)}</span></span></button><button class="mmcOrb mmcInteractive mmcMuted strokeLit" data-poly-go="${esc(m.conditionId)}:1"><span class="mmcSlot mmcFlat">${MMC_TREND_DOWN}</span><span class="mmcLbl">${esc(m.outcomes[1] || 'Down')} <span data-poly-cents="${esc(m.tokenIds[1] || '')}">${polyCents(p1)}</span></span></button></div>
+    <div class="mmcTipsBottom"><span class="mmcTipGroup"><span data-tip="2"></span><span data-tip="3"></span></span><span class="mmcTipGroup"><span data-tip="4"></span><span data-tip="5"></span></span></div>
+    <div class="mmcFoot"><div class="mmcLive"><span class="mmcDot"></span><b>LIVE</b><span>· Polymarket · <span data-ud-end="${endMs}">Ends in ${fmtUdCountdown(endMs - Date.now())}</span></span></div><button class="mmcBookmark mmcInteractive" data-mmc-bookmark aria-label="Bookmark market">${MMC_BOOKMARK}</button></div>
+  </div>`;
+}
+function paintMmcTips(root: HTMLElement) {
+  root.querySelectorAll('[data-mmc-cond]').forEach(card => {
+    const cond = (card as HTMLElement).dataset.mmcCond || '';
+    if (!cond) return;
+    void polyTrades(cond, 25).then(trades => {
+      if (!document.body.contains(card)) return;
+      const tips = trades.map(t => ({ usd: t.size * t.price, up: (t.side === 'BUY') === (t.outcomeIx === 0) })).filter(t => t.usd >= 1).slice(0, 6);
+      tips.forEach((t, i) => {
+        const s = card.querySelector(`[data-tip="${i}"]`) as HTMLElement | null;
+        if (!s) return;
+        s.className = `mmcTip miniMarketTip ${t.up ? 'pos' : 'neg'} ${MMC_TIP_OP[i]}`;
+        s.style.animationDelay = MMC_TIP_DELAYS[i] + 'ms';
+        s.textContent = '+ $' + Math.round(t.usd);
+      });
+    }).catch(() => { /* tips are ambient — absence is fine */ });
+  });
+}
+function wireMmcBookmarks(root: HTMLElement) {
+  root.querySelectorAll('[data-mmc-bookmark]').forEach(b => (b as HTMLElement).onclick = (ev) => { ev.stopPropagation(); b.classList.toggle('on'); });
+}
 function polyMiniCard(e: PolyEvent, m: PolyMarket): string {
   const yes = m.prices[0] ?? 0;
   const ud = isUpDown(m);
+  if (ud) return mmcCardHTML(e, m, m.question, (e.title || '?').trim().charAt(0).toUpperCase());
   return `<div class="polyCard${ud ? ' fillPanel strokeLit' : ''}" data-polym="${esc(m.conditionId)}" role="button" tabindex="0">
     <div class="polyCardTop">${e.image ? `<span class="polyEvIc"><img class="coinImg" src="${esc(e.image)}" alt=""></span>` : ''}<span class="polyQ">${esc(m.question)}</span><span class="polyGaugeWrap">${polyGaugeSVG(yes, ud ? '#3ddc84' : undefined)}<span class="polyGaugePct" data-poly-price="${esc(m.tokenIds[0] || '')}">${polyPct(yes)}</span>${ud ? `<span class="polyGaugeLbl">${esc(m.outcomes[0])}</span>` : ''}</span></div>
     ${ud ? polyOrbPills(m) : `<div class="polyPills"><button class="polyPill yes" data-poly-go="${esc(m.conditionId)}:0">${esc(m.outcomes[0] || 'Yes')} ${polyCents(yes)}</button><button class="polyPill no" data-poly-go="${esc(m.conditionId)}:1">${esc(m.outcomes[1] || 'No')} ${polyCents(m.prices[1] ?? (1 - yes))}</button></div>`}
@@ -6924,23 +6973,97 @@ function fmtUdCountdown(ms: number): string {
   const s = Math.max(0, Math.ceil(ms / 1000));
   return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
 }
-function udWindowLabel(m: PolyMarket, tfSecs: number): string {
-  const end = Date.parse(m.endDate); if (!Number.isFinite(end)) return '';
-  const f = (t: number) => new Date(t).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
-  return f(end - tfSecs * 1000) + ' – ' + f(end);
+// ---- Live ticker card (Up or Down detail) ----
+// The card is the standalone live-ticker component, ported exactly:
+// same layout, same values, Polymarket branding beside the
+// countdown. Its numbers are REAL: Price To Beat, Current Price and
+// the chart line all come from the Chainlink stream these markets
+// resolve on, relayed by the server (/api/poly/chainlink) — never
+// the demo's synthetic series.
+function ltFmtSpot(v: number): string {
+  if (v >= 100) return '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (v >= 1) return '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+  return '$' + v.toPrecision(4);
 }
-function udCells(m: PolyMarket): { mn: string; sc: string } {
-  const s = Math.max(0, Math.ceil((Date.parse(m.endDate) - Date.now()) / 1000));
-  return { mn: String(Math.floor(s / 60)).padStart(2, '0'), sc: String(s % 60).padStart(2, '0') };
+function ltWindowLine(startMs: number, endMs: number): string {
+  const tz = 'America/New_York';
+  const md = new Intl.DateTimeFormat('en-US', { timeZone: tz, month: 'long', day: 'numeric' }).format(new Date(startMs));
+  const parts = (t: number) => new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit', hour12: true }).formatToParts(new Date(t));
+  const hm = (t: number, mer: boolean) => { const p = parts(t); const g = (k: string) => p.find(x => x.type === k)?.value || ''; return mer ? `${g('hour')}:${g('minute')}${g('dayPeriod')}` : `${g('hour')}:${g('minute')}`; };
+  const sameMer = parts(startMs).find(x => x.type === 'dayPeriod')?.value === parts(endMs).find(x => x.type === 'dayPeriod')?.value;
+  return `${md}, ${hm(startMs, !sameMer)}-${hm(endMs, true)} ET`;
+}
+function ltCardHTML(eventTitle: string, tfSecs: number, startMs: number, endMs: number, asset = ''): string {
+  const tfLabel = tfSecs === 300 ? '5m' : tfSecs === 900 ? '15m' : '1h';
+  const title = (eventTitle || '').split(' - ')[0] + ' ' + tfLabel;
+  const logo = UD_COIN_LOGOS[asset] || '';
+  return `<div class="ltCard">
+    <div class="ltHeader">
+      <span class="ltLogo">${logo ? `<img class="ltLogoImg" src="${logo}" alt="">` : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2 4.5 12.2 12 16.6l7.5-4.4L12 2Z"/><path d="M12 22.2 4.5 13.7 12 18.1l7.5-4.4L12 22.2Z" opacity=".72"/></svg>'}</span>
+      <div class="ltTitle"><h3>${esc(title)}</h3>
+        <div class="ltSub"><span>${esc(ltWindowLine(startMs, endMs))}</span><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8h.01"/></svg></div>
+      </div>
+      <div class="ltActions">
+        <button class="ltIconBtn" id="ltEmbed" type="button" aria-label="Copy embed code"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 8-4.5 4L8 16M16 8l4.5 4L16 16"/></svg></button>
+        <button class="ltIconBtn" id="ltCopy" type="button" aria-label="Copy link"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 5h5v5"/><path d="M19 5l-7.5 7.5"/><path d="M19 13.5V19a1.5 1.5 0 0 1-1.5 1.5h-12A1.5 1.5 0 0 1 4 19V7a1.5 1.5 0 0 1 1.5-1.5H11"/></svg></button>
+        <button class="ltIconBtn" id="ltBookmark" type="button" aria-label="Bookmark" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5h10V20l-5-3.6L7 20Z"/></svg></button>
+      </div>
+    </div>
+    <div class="ltStats">
+      <div><div class="ltLabel">Price To Beat</div><div class="ltBig" id="ltBeat">—</div></div>
+      <div class="ltDivider"><div class="ltLabel blue"><span>Current Price</span><span class="ltDelta" id="ltDeltaWrap"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5.5 19 18H5Z"/></svg><span id="ltDelta">—</span></span></div><div class="ltBig indigo" id="ltCur">—</div></div>
+      <div class="ltRight">
+        <div class="ltCount"><div class="ltCell"><div class="ltNum" id="ltMins">--</div><div class="ltUnit">Mins</div></div><div class="ltCell"><div class="ltNum" id="ltSecs">--</div><div class="ltUnit">Secs</div></div></div>
+        <span class="ltBrand"><img src="/assets/polymarket-logo.png" alt="" aria-hidden="true">Polymarket</span>
+      </div>
+    </div>
+    <svg class="ltChart" id="ltSvg" viewBox="0 0 640 260" preserveAspectRatio="none" role="img" aria-label="Live price chart"></svg>
+    <div class="ltMarkers"><div class="ltVals"><span class="ltVal" id="ltDeltaChip">—</span><span class="ltVal" id="ltDeltaPct">—</span></div><span class="ltTarget">Target<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></span></div>
+    <div class="ltFooter"><span class="ltSource">Source: polymarket.com</span><div class="ltTimes" id="ltTimes"></div></div>
+  </div>`;
+}
+// ---- Quick trade panel (Up or Down detail) ----
+// The standalone quick-trade component, ported exactly: indigo
+// diamond tile, muted market title, coloured side label, underline
+// tabs, the 1-Tap / Confirm each / Limit select menu, aurora-orb
+// side buttons with live cent labels, $5/$25/$100 presets with live
+// win lines, and the Terms footer. Execution is the wallet's real
+// Polymarket flow: 1-Tap places through the same build/validate/
+// sign/post path as the review sheet (direct mode), Confirm each
+// and Limit go through the review sheet; the pUSD/session gates
+// apply unchanged.
+const QT_TREND_UP = 'M232,104a8,8,0,0,1-8,8H184a8,8,0,0,1,0-16h28.7L134.3,101.4a8,8,0,0,1-11.3,0L88,66.3,51.3,103a8,8,0,0,1-11.3-11.3l48-48a8,8,0,0,1,11.3,0l35,35L205.4,8H176a8,8,0,0,1,0-16h48a8,8,0,0,1,8,8Z';
+const QT_TREND_DN = 'M232,152a8,8,0,0,1-8,8H184a8,8,0,0,1,0-16h28.7l-78.4,5.4a8,8,0,0,1-11.3,0L88,189.7,51.3,153A8,8,0,0,1,40,141.7l48-48a8,8,0,0,1,11.3,0l35,35L205.4,248H176a8,8,0,0,1,0-16h48a8,8,0,0,1,8,8Z';
+function qtPanelHTML(sel: { eventTitle: string; outcomeIx: number }, m: PolyMarket): string {
+  const title = (sel.eventTitle || '').split(' - ')[0];
+  const side0 = m.outcomes[sel.outcomeIx] || '';
+  return `<div class="qtPanel qtStrokeLit qtFillPanel" role="region" aria-label="Quick trade panel">
+    <div class="qtHead">
+      <span class="qtLogo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="#fff"><path d="M12 2.8 17.2 11.5 12 14.62 6.8 11.5 12 2.8Z"/><path d="M6.8 13.36 12 16.48 17.2 13.36 12 20.9 6.8 13.36Z"/></svg></span>
+      <div><div class="qtSub">${esc(title)}</div><div class="qtSide${side0 === 'Down' ? ' down' : ''}" id="qtSideLabel">${esc(side0)}</div></div>
+    </div>
+    <div class="qtTabs" role="tablist" aria-label="Order type">
+      <button class="qtTab qtInteractive" role="tab" aria-selected="true" data-tside="BUY">Buy</button>
+      <button class="qtTab qtInteractive" role="tab" aria-selected="false" data-tside="SELL">Sell</button>
+      <div class="qtSelect" id="qtSelect">
+        <button class="qtTrigger qtInteractive" aria-haspopup="listbox" aria-expanded="false" id="qtTrigger"><span id="qtModeValue">1-Tap</span><svg viewBox="0 0 256 256" fill="currentColor"><path d="M213.66,101.66l-80,80a8,8,0,0,1-11.32,0l-80-80A8,8,0,0,1,48,88H208a8,8,0,0,1,5.66,13.66Z"/></svg></button>
+        <div class="qtMenu qtFillPanel" role="listbox" id="qtMenu">${['1-Tap', 'Confirm each', 'Limit'].map((md, i) => `<button role="option" aria-selected="${i === 0}" data-qtmode="${md}"><span>${md}</span><svg viewBox="0 0 256 256" fill="currentColor"><path d="M229.66,77.66l-128,128a8,8,0,0,1-11.32,0l-56-56a8,8,0,0,1,11.32-11.32L96,188.69,218.34,66.34a8,8,0,0,1,11.32,11.32Z"/></svg></button>`).join('')}</div>
+      </div>
+    </div>
+    <div class="qtSides" role="group" aria-label="Direction">${m.outcomes.map((o, ix) => `<button class="qtOrb qtStrokeLit qtFillAction qtInteractive${ix === sel.outcomeIx ? ' selected' : ''}" data-out="${ix}"><span class="qtOrbIc"><svg viewBox="0 0 256 256" fill="currentColor"><path d="${ix === 0 ? QT_TREND_UP : QT_TREND_DN}"${ix === 0 ? ' transform="translate(0,24)"' : ' transform="scale(1,-1) translate(0,-232)"'}"/></svg></span><span class="qtLbl">${esc(o)} <b data-poly-pill="${esc(m.tokenIds[ix] || '')}">${polyCents(m.prices[ix] ?? 0)}</b></span></button>`).join('')}</div>
+    <div class="qtLabel" id="qtActionLabel">One-tap buy</div>
+    <div class="qtPresets">${[5, 25, 100].map(a => `<button class="qtPreset qtHoverRaise qtInteractive" data-qtpreset="${a}" aria-pressed="false"><span class="qtAmt">$${a}</span><span class="qtWin" data-qtline="${a}">win <b data-win="${a}">—</b></span></button>`).join('')}</div>
+    <button class="qtSellAll qtInteractive" id="qtSellAll" style="display:none">Sell all shares</button>
+    <div id="polyLimitRow" style="display:none;margin-top:12px"><label class="polyFldLbl">Limit price (¢)</label><input id="polyLimitPx" class="polyIn" inputmode="decimal" placeholder="50"></div>
+    <div class="small muted" id="polyHoldLine" style="margin-top:10px"></div>
+    <div id="polyGateBox"><div style="padding:6px 0">${waveLoadBlockHTML()}</div></div>
+    <div class="err" id="polyTradeErr" style="display:none"></div>
+    <p class="qtStatus" id="qtStatus" aria-live="polite"></p>
+    <p class="qtTerms">By trading, you agree to the <a href="https://polymarket.com/terms" target="_blank" rel="noopener">Terms of Use</a>.</p>
+  </div>`;
 }
 function polyUpDownCard(e: PolyEvent, m: PolyMarket, assetName: string, symbol: string, tfLabel: string): string {
-  const up = m.prices[0] ?? 0;
-  const endMs = Date.parse(m.endDate || e.endDate);
-  return `<div class="polyCard fillPanel strokeLit" data-polym="${esc(m.conditionId)}" role="button" tabindex="0">
-    <div class="polyCardTop">${e.image ? `<span class="polyEvIc"><img class="coinImg" src="${esc(e.image)}" alt=""></span>` : ''}<span class="polyQ">${esc(symbol)} Up or Down ${esc(tfLabel)}</span><span class="polyGaugeWrap">${polyGaugeSVG(up, '#3ddc84')}<span class="polyGaugePct" data-poly-price="${esc(m.tokenIds[0] || '')}">${polyPct(up)}</span><span class="polyGaugeLbl">${esc(m.outcomes[0] || 'Up')}</span></span></div>
-    ${polyOrbPills(m)}
-    <div class="polyCardFoot"><span class="polyLiveTag"><span class="liveDotSm"></span>Live · ${esc(assetName)}</span><span data-ud-end="${endMs}">Ends in ${fmtUdCountdown(endMs - Date.now())}</span></div>
-  </div>`;
+  return mmcCardHTML(e, m, `${symbol} Up or Down ${tfLabel}`, (symbol || '?').charAt(0).toUpperCase());
 }
 
 // Addition 10: positions design — money count-up (first paint per
@@ -7021,11 +7144,15 @@ async function paintInvestPoly(body: HTMLElement) {
     const open = (cond: string, ix: number, el: HTMLElement) => { const hit = byCond.get(cond); if (hit) { polySel = { market: hit.m, eventTitle: hit.e.title, outcomeIx: ix, updown: { asset: hit.asset, tfSecs: polyUpTf } }; go({ route: 'polymarket' }, el); } };
     slot.querySelectorAll('[data-poly-go]').forEach(b => (b as HTMLElement).onclick = (ev) => { ev.stopPropagation(); const [cond, ix] = ((b as HTMLElement).dataset.polyGo || '').split(':'); open(cond, Number(ix) || 0, b as HTMLElement); });
     slot.querySelectorAll('[data-polym]').forEach(card => (card as HTMLElement).onclick = () => open((card as HTMLElement).dataset.polym!, 0, card as HTMLElement));
+    wireMmcBookmarks(slot);
+    paintMmcTips(slot);
     for (const { e } of pairs) { const m = e!.markets[0]; if (m?.tokenIds[0]) polyListUnsubs.push(polyFeed.subscribe(m.tokenIds[0], () => {
       const q2 = polyFeed.quotes.get(m.tokenIds[0]); if (!q2) return;
       const mid = q2.bestBid > 0 && q2.bestAsk > 0 ? (q2.bestBid + q2.bestAsk) / 2 : q2.lastTrade;
       if (!mid) return;
       slot.querySelectorAll(`[data-poly-price="${m.tokenIds[0]}"]`).forEach(el => { el.textContent = polyPct(mid); });
+      slot.querySelectorAll(`[data-poly-cents="${m.tokenIds[0]}"]`).forEach(el => { el.textContent = polyCents(mid); });
+      if (m.tokenIds[1]) slot.querySelectorAll(`[data-poly-cents="${m.tokenIds[1]}"]`).forEach(el => { el.textContent = polyCents(1 - mid); });
     })); }
     let rolling = false;
     polyUdTimer = setInterval(() => {
@@ -7049,6 +7176,15 @@ async function paintInvestPoly(body: HTMLElement) {
       for (const e of events) for (const m of e.markets) byCond.set(m.conditionId, { e, m });
       slot.querySelectorAll('[data-poly-go]').forEach(b => (b as HTMLElement).onclick = (ev) => { ev.stopPropagation(); const [cond, ix] = ((b as HTMLElement).dataset.polyGo || '').split(':'); const hit = byCond.get(cond); if (hit) { polySel = { market: hit.m, eventTitle: hit.e.title, outcomeIx: Number(ix) || 0 }; go({ route: 'polymarket' }, b as HTMLElement); } });
       slot.querySelectorAll('[data-polym]').forEach(card => (card as HTMLElement).onclick = () => { const hit = byCond.get((card as HTMLElement).dataset.polym!); if (hit) { polySel = { market: hit.m, eventTitle: hit.e.title, outcomeIx: 0 }; go({ route: 'polymarket' }, card as HTMLElement); } });
+      wireMmcBookmarks(slot);
+      paintMmcTips(slot);
+      if (slot.querySelector('[data-ud-end]')) {
+        polyUdTimer = setInterval(() => {
+          if (!document.body.contains(slot)) { if (polyUdTimer) { clearInterval(polyUdTimer); polyUdTimer = null; } return; }
+          const now = Date.now();
+          slot.querySelectorAll('[data-ud-end]').forEach(el => { const end = Number((el as HTMLElement).dataset.udEnd); const left = end - now; (el as HTMLElement).textContent = left > 0 ? 'Ends in ' + fmtUdCountdown(left) : 'Ending…'; });
+        }, 1000);
+      }
       // Live % ticks for the visible binary markets (bounded, silent).
       const watch: string[] = [];
       for (const e of events) { const m = e.markets[0]; if (m && m.outcomes.length === 2 && m.tokenIds[0]) watch.push(m.tokenIds[0]); if (watch.length >= 10) break; }
@@ -7057,11 +7193,20 @@ async function paintInvestPoly(body: HTMLElement) {
         const mid = q2.bestBid > 0 && q2.bestAsk > 0 ? (q2.bestBid + q2.bestAsk) / 2 : q2.lastTrade;
         if (!mid) return;
         slot.querySelectorAll(`[data-poly-price="${tid}"]`).forEach(el => { el.textContent = polyPct(mid); });
+        slot.querySelectorAll(`[data-poly-cents="${tid}"]`).forEach(el => { el.textContent = polyCents(mid); });
       }));
     };
     try {
-      const events = await gammaEvents(q.length >= 2 ? { search: q } : { tag: polyCat === 'trending' ? undefined : polyCat, limit: 24 });
+      let events = await gammaEvents(q.length >= 2 ? { search: q } : { tag: polyCat === 'trending' ? undefined : polyCat, limit: 24 });
       if (!document.body.contains(slot)) return;
+      // The live Bitcoin Up or Down window leads the popular list.
+      if (polyCat === 'trending' && q.length < 2) {
+        try {
+          const pin = await gammaEventBySlug(upDownSlug('btc', 300));
+          if (pin && pin.markets.length) events = [pin, ...events.filter(e => e.id !== pin.id)];
+        } catch { /* the pin is a bonus, never a blocker */ }
+        if (!document.body.contains(slot)) return;
+      }
       if (!events.length) {
         if (note) note.innerHTML = '';
         slot.innerHTML = q.length >= 2
@@ -7236,29 +7381,92 @@ function showPolyMarket() {
   const ud = sel.updown ?? parseUpDownSlug(m.slug) ?? undefined;
   polyTrade = { side: 'BUY', mode: 'market', amount: '25', shares: '', limitCents: '' };
   polyMyPos = null;
+  const pillsHTML = `<div class="polyOutPills" id="polyOutPills">${m.outcomes.length === 2 ? m.outcomes.map((o, ix) => `<button class="orbBtn fillAction strokeLit${ix === sel.outcomeIx ? ' on' : ''}" data-out="${ix}"><span class="orbSlot"><i class="${isUpDown(m) ? (ix === 0 ? 'ri-arrow-right-up-line' : 'ri-arrow-right-down-line') : (ix === 0 ? 'ri-check-line' : 'ri-close-line')}"></i></span><span class="orbLbl">${esc(o)}</span><b class="orbCents" data-poly-pill="${esc(m.tokenIds[ix] || '')}">${polyCents(m.prices[ix] ?? 0)}</b></button>`).join('') : m.outcomes.map((o, ix) => `<button class="polyOutPill${ix === sel.outcomeIx ? ' on' : ''}" data-out="${ix}"><span>${esc(o)}</span><b data-poly-pill="${esc(m.tokenIds[ix] || '')}">${polyCents(m.prices[ix] ?? 0)}</b></button>`).join('')}</div>`;
   setView(`<main class="polyMain"><button class="backBtn" id="bk" aria-label="Back"><i class="ri-arrow-left-s-line"></i></button>
-  <div style="padding:2px 16px 0"><div class="polyDetQ">${esc(m.question)}</div>
-  <div class="polyDetMeta"><span>${fmtMcap(m.volume)} Vol.</span><span class="polyMetaSep">·</span>${ud ? `<span id="polyUdCount">Ends in ${fmtUdCountdown(Date.parse(m.endDate) - Date.now())}</span>` : `<span>Ends ${polyEnd(m.endDate)}</span>`}<span class="polyMetaSep">·</span><span class="polyLiveState" id="polyLiveState"><span class="liveDotSm off"></span>Connecting</span></div></div>
-  ${ud ? `<div class="polyUdStats"><div class="polyUdWin"><div class="udLbl">Window</div><div class="udVal">${esc(udWindowLabel(m, ud.tfSecs))}</div></div><div class="polyUdCount"><div class="cell"><div class="num" id="polyUdMin">${udCells(m).mn}</div><div class="unit">Mins</div></div><div class="cell"><div class="num" id="polyUdSec">${udCells(m).sc}</div><div class="unit">Secs</div></div></div></div>` : ''}
-  <div class="polyOutPills" id="polyOutPills">${m.outcomes.length === 2 ? m.outcomes.map((o, ix) => `<button class="orbBtn fillAction strokeLit${ix === sel.outcomeIx ? ' on' : ''}" data-out="${ix}"><span class="orbSlot"><i class="${isUpDown(m) ? (ix === 0 ? 'ri-arrow-right-up-line' : 'ri-arrow-right-down-line') : (ix === 0 ? 'ri-check-line' : 'ri-close-line')}"></i></span><span class="orbLbl">${esc(o)}</span><b class="orbCents" data-poly-pill="${esc(m.tokenIds[ix] || '')}">${polyCents(m.prices[ix] ?? 0)}</b></button>`).join('') : m.outcomes.map((o, ix) => `<button class="polyOutPill${ix === sel.outcomeIx ? ' on' : ''}" data-out="${ix}"><span>${esc(o)}</span><b data-poly-pill="${esc(m.tokenIds[ix] || '')}">${polyCents(m.prices[ix] ?? 0)}</b></button>`).join('')}</div>
-  <div class="polyPriceBlock"><span class="polyBigWrap"><span class="polyBigPrice" id="polyBigPrice">${polyPctNum(m.prices[sel.outcomeIx] ?? 0)}</span><span class="polyBigPct">%</span></span><span class="polyChanceLine">chance · <span id="polyLastTrade">${m.lastTrade ? 'last ' + polyCents(m.lastTrade) : ''}</span></span></div>
-  <div class="polyChartWrap fillPanel strokeLit"><canvas id="polyChart"></canvas><div class="polyChartEmpty" id="polyChartEmpty">${waveLoadBlockHTML('Loading…', true)}</div></div>
+  ${ud ? `<div style="padding:6px 16px 0">${ltCardHTML(sel.eventTitle, ud.tfSecs, Date.parse(m.endDate) - ud.tfSecs * 1000, Date.parse(m.endDate), ud.asset)}</div>` : `<div style="padding:2px 16px 0"><div class="polyDetQ">${esc(m.question)}</div>
+  <div class="polyDetMeta"><span>${fmtMcap(m.volume)} Vol.</span><span class="polyMetaSep">·</span><span>Ends ${polyEnd(m.endDate)}</span><span class="polyMetaSep">·</span><span class="polyLiveState" id="polyLiveState"><span class="liveDotSm off"></span>Connecting</span></div></div>`}
+  ${ud ? '' : pillsHTML}
+  ${ud ? '' : `<div class="polyPriceBlock"><span class="polyBigWrap"><span class="polyBigPrice" id="polyBigPrice">${polyPctNum(m.prices[sel.outcomeIx] ?? 0)}</span><span class="polyBigPct">%</span></span><span class="polyChanceLine">chance · <span id="polyLastTrade">${m.lastTrade ? 'last ' + polyCents(m.lastTrade) : ''}</span></span></div>
+  <div class="polyChartWrap fillPanel strokeLit"><canvas id="polyChart"></canvas><div class="polyChartEmpty" id="polyChartEmpty">${waveLoadBlockHTML('Loading…', true)}</div></div>`}
   <div class="gGroup"><div class="gHead">Order book · <span id="polyBookOutcome">${esc(m.outcomes[sel.outcomeIx] || '')}</span></div><div class="gCard polyBookCard"><div id="polyBook">${waveLoadBlockHTML('Loading…', true)}</div></div></div>
-  <div class="gGroup"><div class="gHead">Trade</div><div class="gCard polyPanel" style="padding:14px">
+  ${ud ? `<div style="padding:14px 16px 0">${qtPanelHTML(sel, m)}</div>` : `  <div class="gGroup"><div class="gHead">Trade</div><div class="gCard polyPanel" style="padding:14px">
     <div class="polySideTabs"><button data-tside="BUY" class="on">Buy</button><button data-tside="SELL">Sell</button><span class="polyModeSeg"><button data-tmode="market" class="on">Market</button><button data-tmode="limit">Limit</button></span></div>
     <div id="polyLimitRow" style="display:none"><label class="polyFldLbl">Limit price (¢)</label><input id="polyLimitPx" class="polyIn" inputmode="decimal" placeholder="50"></div>
     <div id="polyBuyAmt"><label class="polyFldLbl">Amount (pUSD)</label><div class="polyAmtWrap"><input id="polyAmt" class="polyIn" inputmode="decimal" value="25"></div><div class="polyPresetGrid">${[5, 25, 100].map(a => `<button class="polyPreset" data-preset="${a}"><span class="ppAmt">$${a}</span><span class="ppWin">win <b data-win="${a}">—</b></span></button>`).join('')}</div></div>
-    <div id="polySellAmt" style="display:none"><label class="polyFldLbl">Shares</label><div class="polyAmtWrap"><input id="polyShares" class="polyIn" inputmode="decimal" placeholder="0"><button class="polyMaxBtn" id="polyMax" style="display:none">Max</button></div><div class="small muted" id="polyHoldLine"></div></div>
+    <div id="polySellAmt" style="display:none"><label class="polyFldLbl">Shares</label><div class="polyAmtWrap"><input id="polyShares" class="polyIn" inputmode="decimal" placeholder="0"><button class="polyMaxBtn" id="polyMax" style="display:none">Sell all</button></div><div class="small muted" id="polyHoldLine"></div></div>
     <div class="polyEst" id="polyEst"></div>
     <div id="polyGateBox"><div style="padding:6px 0">${waveLoadBlockHTML()}</div></div>
     <div class="err" id="polyTradeErr" style="display:none"></div>
     <button class="ctaWide" id="polyReview" disabled>Review order</button>
     <p class="small muted" style="line-height:1.55;margin-top:10px">Orders are signed by this wallet and sent to Polymarket’s CLOB${''} — Syn never custodies funds. Market buys fill at the walked book price (FOK); limit orders rest on the book (GTC).</p>
-  </div></div>
-  <div id="polyPosBox"></div><div id="polyOrdersBox"></div></main>`);
+  </div></div>`}
+  ${ud ? '<div id="polyHistBox"></div>' : ''}<div id="polyPosBox"></div><div id="polyOrdersBox"></div></main>`);
   ($('#bk') as HTMLElement).onclick = () => goBack({ route: 'invest' });
+  // Live ticker card (Up or Down only): Chainlink beat/current/series
+  // from the server relay, painted in place. Copy/embed copy the real
+  // Polymarket event link; bookmark toggles its state, as in the
+  // standalone component.
+  let ltData: { beat: number | null; current: number | null; samples: [number, number][] } | null = null;
+  const ltStart = Date.parse(m.endDate) - (ud ? ud.tfSecs * 1000 : 0);
+  const ltEnd = Date.parse(m.endDate);
+  const ltPaint = () => {
+    if (!ud) return;
+    const s = Math.max(0, Math.ceil((ltEnd - Date.now()) / 1000));
+    const mn = $('#ltMins'); if (mn) mn.textContent = String(Math.floor(s / 60)).padStart(2, '0');
+    const sc = $('#ltSecs'); if (sc) sc.textContent = String(s % 60).padStart(2, '0');
+    const d = ltData;
+    const beatEl = $('#ltBeat'); if (beatEl) beatEl.textContent = d && d.beat != null ? ltFmtSpot(d.beat) : '—';
+    const curEl = $('#ltCur'); if (curEl) curEl.textContent = d && d.current != null ? ltFmtSpot(d.current) : '—';
+    const hasDelta = !!(d && d.beat != null && d.current != null && d.beat > 0);
+    const dv = hasDelta ? (d!.current as number) - (d!.beat as number) : 0;
+    const dTxt = hasDelta ? (dv < 0 ? '− ' : '+ ') + '$' + Math.abs(dv).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—';
+    const dEl = $('#ltDelta'); if (dEl) dEl.textContent = dTxt;
+    const dWrap = $('#ltDeltaWrap'); if (dWrap) dWrap.className = 'ltDelta' + (hasDelta ? (dv < 0 ? ' neg' : ' pos') : '');
+    const chip = $('#ltDeltaChip'); if (chip) { chip.textContent = dTxt; chip.className = 'ltVal' + (hasDelta ? (dv < 0 ? ' neg' : ' pos') : ''); }
+    const pct = $('#ltDeltaPct');
+    if (pct) { const pv = hasDelta ? (dv / (d!.beat as number)) * 100 : 0; pct.textContent = hasDelta ? (pv < 0 ? '−' : '+') + Math.abs(pv).toFixed(Math.abs(pv) < 0.01 && pv !== 0 ? 3 : 2) + '%' : '—'; pct.className = 'ltVal' + (hasDelta ? (dv < 0 ? ' neg' : ' pos') : ''); }
+    const times = $('#ltTimes');
+    if (times && !times.childElementCount) {
+      const f = (t: number) => new Date(t).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+      const tgt = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r="1" fill="currentColor"/></svg>';
+      times.innerHTML = [0, 1, 2, 3, 4].map(i => `<span class="${i % 2 ? 'alt' : ''}">${i === 4 ? tgt + 'Target ' : ''}${f(ltStart + (ltEnd - ltStart) * i / 4)}</span>`).join('');
+    }
+    const svg = document.getElementById('ltSvg');
+    if (svg && d && d.samples.length) {
+      const vals = d.samples.map(p => p[1]);
+      if (d.beat != null) vals.push(d.beat);
+      if (d.current != null) vals.push(d.current);
+      let lo = Math.min(...vals), hi = Math.max(...vals);
+      const pad = (hi - lo) * 0.14 || hi * 0.001 || 1;
+      lo -= pad; hi += pad;
+      const X = (t: number) => ((t - ltStart) / (ltEnd - ltStart)) * 556;
+      const Y = (v: number) => 24 + (1 - (v - lo) / (hi - lo)) * 212;
+      let g = '';
+      for (let i = 0; i < 5; i++) { const v = hi - (hi - lo) * i / 4; const y = 24 + 212 * i / 4; g += `<line x1="0" y1="${y.toFixed(1)}" x2="556" y2="${y.toFixed(1)}" stroke="rgba(148,163,184,.14)"/><text x="564" y="${(y + 4).toFixed(1)}" font-size="11" fill="#8b94a3">${ltFmtSpot(v)}</text>`; }
+      if (d.beat != null) { const y = Y(d.beat); g += `<line x1="0" y1="${y.toFixed(1)}" x2="556" y2="${y.toFixed(1)}" stroke="#6d7cff" stroke-width="1" stroke-dasharray="4 4" opacity=".85"/>`; }
+      g += `<polyline points="${d.samples.map(p => `${X(p[0]).toFixed(1)},${Y(p[1]).toFixed(1)}`).join(' ')}" fill="none" stroke="#6d7cff" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+      const last = d.samples[d.samples.length - 1];
+      g += `<g><circle class="ltPulse" cx="${X(last[0]).toFixed(1)}" cy="${Y(last[1]).toFixed(1)}" r="11" fill="rgba(109,124,255,.18)"/><circle cx="${X(last[0]).toFixed(1)}" cy="${Y(last[1]).toFixed(1)}" r="5" fill="#6d7cff" stroke="#fff" stroke-width="2"/></g>`;
+      svg.innerHTML = g;
+    }
+  };
+  const ltFetch = async () => {
+    if (!ud) return;
+    try {
+      const r = await fetch(`/api/poly/chainlink?symbol=${encodeURIComponent(ud.asset)}&start=${Math.floor(ltStart / 1000)}&end=${Math.floor(ltEnd / 1000)}`, { cache: 'no-store' });
+      if (r.ok) { ltData = await r.json(); ltPaint(); }
+    } catch { /* keep the last paint */ }
+  };
+  if (ud) {
+    const evUrl = 'https://polymarket.com/event/' + (m.slug || '');
+    const cp = $('#ltCopy'); if (cp) cp.onclick = (e) => { void copyText(evUrl, e.currentTarget as HTMLElement); };
+    const em = $('#ltEmbed'); if (em) em.onclick = (e) => { void copyText(`<iframe src="${evUrl}" width="400" height="200" frameborder="0"></iframe>`, e.currentTarget as HTMLElement); };
+    const bm = $('#ltBookmark'); if (bm) bm.onclick = () => { const on = bm.classList.toggle('on'); bm.setAttribute('aria-pressed', String(on)); };
+    ltPaint();
+  }
   const tokenOf = (ix: number) => m.tokenIds[ix] || '';
   let selected = sel.outcomeIx;
+  let qtMode: 'tap' | 'confirm' | 'limit' = 'tap';
   let bookTimer: ReturnType<typeof setTimeout> | null = null;
   let chartQueued = false;
 
@@ -7274,6 +7482,23 @@ function showPolyMarket() {
   // current book (the quick-trade-panel design) — recomputed wherever
   // paintEst runs: feed ticks, book seeds, side/mode/input changes.
   const paintPresets = () => {
+    // Quick-trade tiles on the sell side quote share counts instead
+    // of win amounts: the $ tile means "sell $X worth", converted at
+    // the current bid (or the limit price) and capped at holdings.
+    if (ud) {
+      document.querySelectorAll('[data-qtline]').forEach(line => {
+        const amt = parseFloat((line as HTMLElement).dataset.qtline || '0');
+        if (polyTrade.side === 'SELL') {
+          const bk2 = curBook(); const bid = bk2?.bids[0]?.price ?? 0;
+          const held = polyMyPos && polyMyPos.asset === tokenOf(selected) ? polyMyPos.size : 0;
+          const ref = polyTrade.mode === 'limit' ? (parseFloat(polyTrade.limitCents) || 0) / 100 : bid;
+          const n = ref > 0 ? Math.min(held, amt / ref) : 0;
+          (line as HTMLElement).textContent = held > 0 && n > 0 ? `≈ ${trimNum(n, 1)} shares` : '— shares';
+        } else if (!line.querySelector('[data-win]')) {
+          line.innerHTML = `win <b data-win="${amt}">—</b>`;
+        }
+      });
+    }
     document.querySelectorAll('[data-win]').forEach(el => {
       const amt = parseFloat((el as HTMLElement).dataset.win || '0');
       let txt = '—';
@@ -7323,6 +7548,9 @@ function showPolyMarket() {
     const mid = q && q.bestBid > 0 && q.bestAsk > 0 ? (q.bestBid + q.bestAsk) / 2 : bk?.bids[0] && bk?.asks[0] ? (bk.bids[0].price + bk.asks[0].price) / 2 : q?.lastTrade || 0;
     const bp = $('#polyBigPrice'); if (bp && mid) bp.textContent = polyPctNum(mid);
     const lt = $('#polyLastTrade'); if (lt && q?.lastTrade) lt.textContent = 'last ' + polyCents(q.lastTrade);
+    const sl = $('#qtSideLabel');
+    if (sl) { sl.textContent = m.outcomes[selected] || ''; sl.classList.toggle('down', (m.outcomes[selected] || '') === 'Down'); }
+    document.querySelectorAll('.qtOrb').forEach(x => x.classList.toggle('selected', Number((x as HTMLElement).dataset.out) === selected));
   };
   const queueChart = () => { if (chartQueued) return; chartQueued = true; requestAnimationFrame(() => { chartQueued = false; drawPolyChart(); }); };
   const appendPoint = () => {
@@ -7365,6 +7593,10 @@ function showPolyMarket() {
   // the feed socket closes when the last subscription goes).
   for (let ix = 0; ix < m.tokenIds.length; ix++) { const tid = tokenOf(ix); if (tid) polyDetailUnsubs.push(polyFeed.subscribe(tid, onFeedEvent(tid))); }
   polyDetailUnsubs.push(polyFeed.onStatus(s => { const el = $('#polyLiveState'); if (el) el.innerHTML = s === 'live' ? '<span class="liveDotSm"></span>Live' : s === 'connecting' ? '<span class="liveDotSm off"></span>Connecting' : '<span class="liveDotSm off"></span>Offline'; }));
+  // Steady repaint: win lines, estimates and pill prices track the
+  // latest book even when the stream is quiet between trades.
+  const estIv = setInterval(() => { if (currentRoute === 'polymarket') { paintPills(); paintEst(); } }, 2000);
+  polyDetailUnsubs.push(() => clearInterval(estIv));
   void seedToken(selected);
   if (tokenOf(1 - selected)) void clobBook(tokenOf(1 - selected)).then(bk => polyFeed.books.set(tokenOf(1 - selected), bk)).catch(() => { /* seeded by the stream */ });
   // Up or Down rollover: the window ends minutes after it opens, so
@@ -7375,13 +7607,14 @@ function showPolyMarket() {
   // it, the tick retries.
   if (ud) {
     let rolling = false;
+    let ltTicks = 0;
+    void ltFetch();
     const iv = setInterval(async () => {
       if (currentRoute !== 'polymarket') { clearInterval(iv); return; }
       const left = Date.parse(m.endDate) - Date.now();
-      const el = $('#polyUdCount');
-      if (el) el.textContent = left > 0 ? 'Ends in ' + fmtUdCountdown(left) : 'Ended — loading the current window…';
-      const mn = $('#polyUdMin'); const sc = $('#polyUdSec');
-      if (mn && sc) { const s = Math.max(0, Math.ceil(left / 1000)); mn.textContent = String(Math.floor(s / 60)).padStart(2, '0'); sc.textContent = String(s % 60).padStart(2, '0'); }
+      ltTicks++;
+      ltPaint();
+      if (ltTicks % 2 === 0) void ltFetch();
       if (left <= 0 && !rolling) {
         rolling = true;
         try {
@@ -7410,11 +7643,13 @@ function showPolyMarket() {
     polyMyPos = myPosList.find(p => p.conditionId === m.conditionId && p.asset === tokenOf(selected)) || null;
     const box = $('#polyPosBox'); if (!box || currentRoute !== 'polymarket') return;
     const mb = $('#polyMax') as HTMLElement | null;
-    if (!polyMyPos) { box.innerHTML = ''; const hl0 = $('#polyHoldLine'); if (hl0) hl0.textContent = ''; if (mb) mb.style.display = 'none'; return; }
+    const sa = $('#qtSellAll') as HTMLElement | null;
+    if (!polyMyPos) { box.innerHTML = ''; const hl0 = $('#polyHoldLine'); if (hl0) hl0.textContent = ''; if (mb) mb.style.display = 'none'; if (sa) sa.style.display = 'none'; return; }
     const p = polyMyPos;
     box.innerHTML = `<div class="gGroup"><div class="gHead">Your position</div><div class="gCard"><div class="sRow stat"><span class="sTx"><span class="sLbl">${esc(p.outcome)} · ${trimNum(p.size, 2)} shares</span><div class="sSub">Avg ${polyCents(p.avgPrice)} · now ${polyCents(p.curPrice)}</div></span><span class="sVal strong">${fmtUsd(p.currentValue)} <span class="${p.cashPnl >= 0 ? 'pos' : 'neg'}">(${p.cashPnl >= 0 ? '+' : '−'}${fmtUsd(Math.abs(p.cashPnl)).slice(1)})</span></span></div></div></div>`;
     const hl = $('#polyHoldLine'); if (hl) hl.textContent = `You hold ${trimNum(p.size, 2)} ${p.outcome} shares`;
     if (mb) mb.style.display = 'inline-block';
+    if (sa) { sa.style.display = polyTrade.side === 'SELL' ? 'block' : 'none'; sa.textContent = `Sell all · ${trimNum(p.size, 2)} shares`; }
   };
   // Outcome switching reseeds chart + book for the newly selected token.
   document.querySelectorAll('[data-out]').forEach(b => (b as HTMLElement).onclick = () => {
@@ -7426,25 +7661,136 @@ function showPolyMarket() {
   });
   // Trade panel wiring.
   const syncPanel = () => {
-    document.querySelectorAll('[data-tside]').forEach(x => x.classList.toggle('on', (x as HTMLElement).dataset.tside === polyTrade.side));
+    document.querySelectorAll('[data-tside]').forEach(x => { x.classList.toggle('on', (x as HTMLElement).dataset.tside === polyTrade.side); if (x.classList.contains('qtTab')) x.setAttribute('aria-selected', String((x as HTMLElement).dataset.tside === polyTrade.side)); });
     document.querySelectorAll('[data-tmode]').forEach(x => x.classList.toggle('on', (x as HTMLElement).dataset.tmode === polyTrade.mode));
-    ($('#polyLimitRow') as HTMLElement).style.display = polyTrade.mode === 'limit' ? 'block' : 'none';
-    ($('#polyBuyAmt') as HTMLElement).style.display = polyTrade.side === 'BUY' ? 'block' : 'none';
-    ($('#polySellAmt') as HTMLElement).style.display = polyTrade.side === 'SELL' ? 'block' : 'none';
+    const lr = $('#polyLimitRow'); if (lr) lr.style.display = polyTrade.mode === 'limit' ? 'block' : 'none';
+    const ba = $('#polyBuyAmt'); if (ba) ba.style.display = polyTrade.side === 'BUY' ? 'block' : 'none';
+    const sa = $('#polySellAmt'); if (sa) sa.style.display = polyTrade.side === 'SELL' ? 'block' : 'none';
+    const al = $('#qtActionLabel');
+    if (al) al.textContent = qtMode === 'tap' ? `One-tap ${polyTrade.side.toLowerCase()}` : `${polyTrade.side === 'BUY' ? 'Buy' : 'Sell'} · ${qtMode === 'limit' ? 'Limit' : 'Confirm each'}`;
+    const sa2 = $('#qtSellAll'); if (sa2) sa2.style.display = polyTrade.side === 'SELL' && polyMyPos && polyMyPos.asset === tokenOf(selected) ? 'block' : 'none';
     paintEst();
   };
   document.querySelectorAll('[data-tside]').forEach(b => (b as HTMLElement).onclick = () => { polyTrade.side = (b as HTMLElement).dataset.tside as 'BUY' | 'SELL'; syncPanel(); });
   document.querySelectorAll('[data-tmode]').forEach(b => (b as HTMLElement).onclick = () => { polyTrade.mode = (b as HTMLElement).dataset.tmode as 'market' | 'limit'; syncPanel(); });
-  document.querySelectorAll('[data-preset]').forEach(b => (b as HTMLElement).onclick = () => { polyTrade.amount = (b as HTMLElement).dataset.preset!; ($('#polyAmt') as unknown as HTMLInputElement).value = polyTrade.amount; paintEst(); });
-  ($('#polyAmt') as unknown as HTMLInputElement).addEventListener('input', e => { polyTrade.amount = (e.target as HTMLInputElement).value; paintEst(); });
-  ($('#polyShares') as unknown as HTMLInputElement).addEventListener('input', e => { polyTrade.shares = (e.target as HTMLInputElement).value; paintEst(); });
-  ($('#polyLimitPx') as unknown as HTMLInputElement).addEventListener('input', e => { polyTrade.limitCents = (e.target as HTMLInputElement).value; paintEst(); });
+  document.querySelectorAll('[data-preset]').forEach(b => (b as HTMLElement).onclick = () => { polyTrade.amount = (b as HTMLElement).dataset.preset!; const ai = $('#polyAmt') as unknown as HTMLInputElement | null; if (ai) ai.value = polyTrade.amount; paintEst(); });
+  const amtIn = $('#polyAmt') as unknown as HTMLInputElement | null; if (amtIn) amtIn.addEventListener('input', e => { polyTrade.amount = (e.target as HTMLInputElement).value; paintEst(); });
+  const shIn = $('#polyShares') as unknown as HTMLInputElement | null; if (shIn) shIn.addEventListener('input', e => { polyTrade.shares = (e.target as HTMLInputElement).value; paintEst(); });
+  const lpIn = $('#polyLimitPx') as unknown as HTMLInputElement | null; if (lpIn) lpIn.addEventListener('input', e => { polyTrade.limitCents = (e.target as HTMLInputElement).value; paintEst(); });
   const maxBtn = $('#polyMax') as HTMLElement | null;
-  if (maxBtn) maxBtn.onclick = () => { if (polyMyPos) { polyTrade.shares = String(Math.floor(polyMyPos.size * 100) / 100); ($('#polyShares') as unknown as HTMLInputElement).value = polyTrade.shares; paintEst(); } };
+  if (maxBtn) maxBtn.onclick = () => { if (polyMyPos) { polyTrade.shares = String(Math.floor(polyMyPos.size * 100) / 100); const si = $('#polyShares') as unknown as HTMLInputElement | null; if (si) si.value = polyTrade.shares; paintEst(); } };
+  // Quick trade panel wiring (Up or Down only): the select menu
+  // picks the execution mode; preset taps act on it — 1-Tap places
+  // through the same order path as the review sheet's confirm,
+  // Confirm each / Limit open the review sheet.
+  let qtStatusTimer: ReturnType<typeof setTimeout> | undefined;
+  const qtStatus = (html: string, sticky = false) => {
+    const st = $('#qtStatus'); if (!st) return;
+    st.innerHTML = html; st.classList.add('show');
+    if (qtStatusTimer) clearTimeout(qtStatusTimer);
+    if (!sticky) qtStatusTimer = setTimeout(() => st.classList.remove('show'), 3600);
+  };
+  if (ud) {
+    const selBox = $('#qtSelect'); const trig = $('#qtTrigger');
+    const closeQtMenu = () => { if (selBox) selBox.classList.remove('open'); if (trig) trig.setAttribute('aria-expanded', 'false'); };
+    if (trig && selBox) trig.onclick = (e) => { e.stopPropagation(); const open = selBox.classList.toggle('open'); trig.setAttribute('aria-expanded', String(open)); };
+    document.querySelectorAll('[data-qtmode]').forEach(b => (b as HTMLElement).onclick = () => {
+      const md = (b as HTMLElement).dataset.qtmode!;
+      qtMode = md === 'Limit' ? 'limit' : md === 'Confirm each' ? 'confirm' : 'tap';
+      polyTrade.mode = qtMode === 'limit' ? 'limit' : 'market';
+      const mv = $('#qtModeValue'); if (mv) mv.textContent = md;
+      document.querySelectorAll('[data-qtmode]').forEach(x => x.setAttribute('aria-selected', String(x === b)));
+      closeQtMenu(); syncPanel();
+    });
+    const onDocDown = (e: Event) => { if (selBox && !selBox.contains(e.target as Node)) closeQtMenu(); };
+    const onDocKey = (e: KeyboardEvent) => { if (e.key === 'Escape') closeQtMenu(); };
+    document.addEventListener('mousedown', onDocDown);
+    document.addEventListener('keydown', onDocKey);
+    polyDetailUnsubs.push(() => { document.removeEventListener('mousedown', onDocDown); document.removeEventListener('keydown', onDocKey); });
+    document.querySelectorAll('[data-qtpreset]').forEach(b => (b as HTMLElement).onclick = () => {
+      const amt = parseFloat((b as HTMLElement).dataset.qtpreset || '0');
+      document.querySelectorAll('[data-qtpreset]').forEach(x => x.setAttribute('aria-pressed', 'false'));
+      b.setAttribute('aria-pressed', 'true');
+      if (polyTrade.side === 'BUY') { polyTrade.amount = String(amt); }
+      else {
+        const bk = curBook();
+        const ref = polyTrade.mode === 'limit' ? (parseFloat(polyTrade.limitCents) || 0) / 100 : (bk?.bids[0]?.price ?? 0);
+        const held = polyMyPos && polyMyPos.asset === tokenOf(selected) ? polyMyPos.size : 0;
+        if (held <= 0) { qtStatus(`You don't hold any ${esc(m.outcomes[selected] || '')} shares to sell.`); return; }
+        if (ref <= 0) { qtStatus(polyTrade.mode === 'limit' ? 'Set a limit price first.' : 'No bids to sell into right now.'); return; }
+        const sh = Math.min(held, amt / ref);
+        polyTrade.shares = String(Math.floor(sh * 100) / 100);
+        if (sh < amt / ref - 1e-9) qtStatus(`Capped at your ${trimNum(held, 2)} shares — selling ${trimNum(sh, 2)}.`);
+      }
+      paintEst();
+      if (qtMode === 'tap') { qtStatus('Posting…', true); void polyReviewOrder(m, () => selected, curBook, paintGate, { direct: true, onStatus: (t) => qtStatus(t) }); }
+      else if (qtMode === 'limit' && !((parseFloat(polyTrade.limitCents) || 0) > 0)) { qtStatus('Set a limit price first, then tap a preset to review.'); const lp = $('#polyLimitPx'); if (lp) lp.focus(); }
+      else { void polyReviewOrder(m, () => selected, curBook, paintGate); }
+    });
+    const saBtn = $('#qtSellAll') as HTMLElement | null;
+    if (saBtn) saBtn.onclick = () => {
+      const held = polyMyPos && polyMyPos.asset === tokenOf(selected) ? polyMyPos.size : 0;
+      if (held <= 0) { qtStatus(`You don't hold any ${esc(m.outcomes[selected] || '')} shares to sell.`); return; }
+      polyTrade.shares = String(Math.floor(held * 100) / 100);
+      paintEst();
+      if (qtMode === 'tap') { qtStatus('Posting…', true); void polyReviewOrder(m, () => selected, curBook, paintGate, { direct: true, onStatus: (t) => qtStatus(t) }); }
+      else if (qtMode === 'limit' && !((parseFloat(polyTrade.limitCents) || 0) > 0)) { qtStatus('Set a limit price first, then tap Sell all to review.'); const lp = $('#polyLimitPx'); if (lp) lp.focus(); }
+      else { void polyReviewOrder(m, () => selected, curBook, paintGate); }
+    };
+  }
   // His positions in this market (public read) — painted per outcome
   // by paintPolyPos (defined above, also runs on outcome switches).
   const addr = evmAddressOf();
   if (addr) void polyPositions(addr).then(ps => { myPosList = ps; paintPolyPos(); }).catch(() => { /* read-only — absence is fine */ });
+  // Recent windows: the last five windows for this asset + timeframe,
+  // with how each resolved (Gamma's closed markets settle at 1/0).
+  if (ud) {
+    void (async () => {
+      const box = $('#polyHistBox'); if (!box) return;
+      const endMs = Date.parse(m.endDate); const startMs = endMs - ud.tfSecs * 1000;
+      const hm = (t: number) => new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit', hour12: true }).format(new Date(t));
+      const dy = (t: number) => new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric' }).format(new Date(t));
+      const evs = await Promise.all([1, 2, 3, 4, 5].map(k => gammaEventBySlug(upDownSlug(ud.asset, ud.tfSecs, startMs - k * ud.tfSecs * 1000)).catch(() => null)));
+      // Each window's real Chainlink move (beat → final tick in the
+      // window) from the server's stream buffer; absent when the
+      // buffer doesn't reach that far back — the row then carries
+      // the result only.
+      const cls = await Promise.all([1, 2, 3, 4, 5].map(async k => {
+        const wStart = startMs - k * ud.tfSecs * 1000; const wEnd = wStart + ud.tfSecs * 1000;
+        try {
+          const r = await fetch(`/api/poly/chainlink?symbol=${encodeURIComponent(ud.asset)}&start=${Math.floor(wStart / 1000)}&end=${Math.floor(wEnd / 1000)}`, { cache: 'no-store' });
+          const j = await r.json();
+          const samples = Array.isArray(j?.samples) ? j.samples : [];
+          return { beat: j?.beat != null ? Number(j.beat) : null, fin: samples.length ? Number(samples[samples.length - 1][1]) : null };
+        } catch { return { beat: null, fin: null }; }
+      }));
+      if (!document.body.contains(box) || currentRoute !== 'polymarket') return;
+      let upWins = 0, downWins = 0;
+      const rows = evs.map((ev, i) => {
+        const wStart = startMs - (i + 1) * ud.tfSecs * 1000; const wEnd = wStart + ud.tfSecs * 1000;
+        const pm = ev?.markets[0];
+        const cl = cls[i];
+        let pill: string;
+        if (!pm) pill = '<span class="histPill wait">—</span>';
+        else if (pm.closed) {
+          const winIx = pm.prices[0] >= pm.prices[1] ? 0 : 1;
+          const wname = pm.outcomes[winIx] || '';
+          if (wname === 'Down') downWins++; else upWins++;
+          pill = `<span class="histPill ${wname === 'Down' ? 'down' : 'up'}">${esc(wname)} won</span>`;
+        } else pill = '<span class="histPill wait">Settling…</span>';
+        let move = '';
+        let sub = dy(wStart);
+        if (cl.beat != null && cl.fin != null && cl.beat > 0) {
+          const pct = (cl.fin - cl.beat) / cl.beat * 100;
+          move = `<span class="histMove ${pct >= 0 ? 'pos' : 'neg'}">${pct >= 0 ? '+' : '−'}${Math.abs(pct).toFixed(2)}%</span>`;
+          sub += ` · ${ltFmtSpot(cl.beat)} → ${ltFmtSpot(cl.fin)}`;
+        }
+        return `<div class="sRow stat"><span class="sTx"><span class="sLbl">${hm(wStart)} – ${hm(wEnd)} ET</span><div class="sSub">${sub}</div></span><span class="histRight">${move}${pill}</span></div>`;
+      }).join('');
+      const sum = upWins + downWins > 0 ? ` · Up ${upWins} / Down ${downWins}` : '';
+      box.innerHTML = `<div class="gGroup"><div class="gHead">Recent windows${sum}</div><div class="gCard">${rows}</div></div>`;
+    })();
+  }
   // Open orders on this market (L2 read; needs session credentials).
   // Audit fix: resting limit orders were invisible and uncancellable
   // anywhere in the app after the "Order posted" sheet closed.
@@ -7511,15 +7857,16 @@ function showPolyMarket() {
     };
   };
   void paintGate();
-  ($('#polyReview') as unknown as HTMLButtonElement).onclick = () => void polyReviewOrder(m, () => selected, curBook, paintGate);
+  const reviewBtn = $('#polyReview') as unknown as HTMLButtonElement | null;
+  if (reviewBtn) reviewBtn.onclick = () => void polyReviewOrder(m, () => selected, curBook, paintGate);
   syncPanel();
 }
 
-async function polyReviewOrder(m: PolyMarket, getSelected: () => number, curBook: () => Book | undefined, paintGate: (f?: boolean) => Promise<void>) {
+async function polyReviewOrder(m: PolyMarket, getSelected: () => number, curBook: () => Book | undefined, paintGate: (f?: boolean) => Promise<void>, opts?: { direct?: boolean; onStatus?: (html: string) => void }) {
   const selected = getSelected();
   const tid = m.tokenIds[selected]; if (!tid) return;
   const errBox = $('#polyTradeErr');
-  const fail = (t: string) => { if (errBox) { errBox.style.display = 'block'; errBox.textContent = t; } };
+  const fail = (t: string) => { if (errBox) { errBox.style.display = 'block'; errBox.textContent = t; } if (opts?.direct) opts.onStatus?.(esc(t)); };
   if (errBox) errBox.style.display = 'none';
   const gate = await evalPolyGate(m);
   if (gate.state !== 'ready' || !polyCreds) { fail('Trading is not ready: ' + gate.msg); return; }
@@ -7558,6 +7905,27 @@ async function polyReviewOrder(m: PolyMarket, getSelected: () => number, curBook
       } catch { /* the read failed — the CLOB still enforces holdings; don't block on it */ }
     }
   }
+  // One sign+post implementation for both the review sheet's
+  // confirm and the quick-trade panel's 1-Tap mode (direct): the
+  // order is built, validated and affordability-checked above;
+  // this is the only place it is signed and sent.
+  const doPost = async (reportErr: (t: string) => void): Promise<Awaited<ReturnType<typeof postOrder>> | null> => {
+    try {
+      const pk = evmPrivKey(); if (!pk || !polyCreds) throw new Error('wallet locked');
+      const wallet = new ethers.Wallet(pk);
+      const signed = await buildSignedOrder(wallet, { tokenId: tid, side: polyTrade.side, rawMakerAmt: rawMaker, rawTakerAmt: rawTaker, negRisk: m.negRisk, builderCode: featureCfg.polymarketBuilderCode || undefined });
+      if (!verifyOrderSignature(signed, m.negRisk)) throw new Error('local signature check failed — order not sent');
+      const res = await postOrder(wallet, polyCreds, signed, orderType);
+      if (!res.ok) { reportErr(res.error || 'The CLOB rejected the order.'); return null; }
+      polyGateCache = null; void paintGate(true);
+      return res;
+    } catch (e) { reportErr('Could not post the order: ' + (e instanceof Error ? e.message : String(e))); return null; }
+  };
+  if (opts?.direct) {
+    const res = await doPost(t => opts.onStatus?.(esc(t)));
+    if (res) opts.onStatus?.(`<b>${polyTrade.side} ${esc(outcome)}</b> — ${trimNum(shares, 2)} shares @ ${polyCents(price)} · ${esc(res.status || 'accepted')}`);
+    return;
+  }
   const close = openSheet('Review order', `<div class="detCard" style="margin:0">
     <div class="detRow"><span class="detLbl">Market</span><span class="detVal" style="text-align:right;max-width:62%">${esc(m.question)}</span></div>
     <div class="detRow"><span class="detLbl">Outcome</span><span class="detVal">${esc(outcome)}</span></div>
@@ -7576,25 +7944,15 @@ async function polyReviewOrder(m: PolyMarket, getSelected: () => number, curBook
   ($('#polyCancel') as HTMLElement).onclick = () => close();
   ($('#polyConfirm') as HTMLElement).onclick = async () => {
     const btn = $('#polyConfirm') as unknown as HTMLButtonElement; btnBusy(btn, 'Posting…');
-    try {
-      const pk = evmPrivKey(); if (!pk || !polyCreds) throw new Error('wallet locked');
-      const wallet = new ethers.Wallet(pk);
-      const signed = await buildSignedOrder(wallet, { tokenId: tid, side: polyTrade.side, rawMakerAmt: rawMaker, rawTakerAmt: rawTaker, negRisk: m.negRisk, builderCode: featureCfg.polymarketBuilderCode || undefined });
-      if (!verifyOrderSignature(signed, m.negRisk)) throw new Error('local signature check failed — order not sent');
-      const res = await postOrder(wallet, polyCreds, signed, orderType);
-      if (!res.ok) { const pe = $('#polyPostErr'); if (pe) { pe.style.display = 'block'; pe.textContent = res.error || 'The CLOB rejected the order.'; } btn.disabled = false; btn.textContent = 'Confirm ' + polyTrade.side.toLowerCase(); return; }
-      close();
-      const done = openSheet('Order posted', `<div class="detCard" style="margin:0">
-        <div class="detRow"><span class="detLbl">Status</span><span class="detVal">${esc(res.status || 'accepted')}</span></div>
-        <div class="detRow"><span class="detLbl">Order ID</span><span class="detVal" style="max-width:62%;overflow:hidden;text-overflow:ellipsis">${esc(res.orderId || '—')}</span></div>
-        <div class="detRow"><span class="detLbl">Order</span><span class="detVal">${polyTrade.side} ${trimNum(shares, 2)} ${esc(outcome)} @ ${polyCents(price)}</span></div>
-      </div><div style="height:12px"></div><button class="ctaWide" id="polyDone">Done</button>`);
-      ($('#polyDone') as HTMLElement).onclick = () => done();
-      polyGateCache = null; void paintGate(true);
-    } catch (e) {
-      const pe = $('#polyPostErr'); if (pe) { pe.style.display = 'block'; pe.textContent = 'Could not post the order: ' + (e instanceof Error ? e.message : String(e)); }
-      btn.disabled = false; btn.textContent = 'Confirm ' + polyTrade.side.toLowerCase();
-    }
+    const res = await doPost(t => { const pe = $('#polyPostErr'); if (pe) { pe.style.display = 'block'; pe.textContent = t; } });
+    if (!res) { btn.disabled = false; btn.textContent = 'Confirm ' + polyTrade.side.toLowerCase(); return; }
+    close();
+    const done = openSheet('Order posted', `<div class="detCard" style="margin:0">
+      <div class="detRow"><span class="detLbl">Status</span><span class="detVal">${esc(res.status || 'accepted')}</span></div>
+      <div class="detRow"><span class="detLbl">Order ID</span><span class="detVal" style="max-width:62%;overflow:hidden;text-overflow:ellipsis">${esc(res.orderId || '—')}</span></div>
+      <div class="detRow"><span class="detLbl">Order</span><span class="detVal">${polyTrade.side} ${trimNum(shares, 2)} ${esc(outcome)} @ ${polyCents(price)}</span></div>
+    </div><div style="height:12px"></div><button class="ctaWide" id="polyDone">Done</button>`);
+    ($('#polyDone') as HTMLElement).onclick = () => done();
   };
 }
 
@@ -8356,6 +8714,33 @@ function purgeLegacyServiceWorker() {
 // ---------- boot ----------
 // Hardened after the 2026-11-19 eternal-splash incident: every step
 // is isolated so a failure degrades that step instead of killing the
+// Self-update: when a new build ships while the app sits open (the
+// common case on a phone), the next return to the tab reloads it
+// once, so what's on screen is always the current release. The
+// check compares /api/health's build stamp against the one seen at
+// boot; it never interrupts typing or an open sheet — it simply
+// retries on the next return.
+let bootedBuild = '';
+let lastUpdateCheck = 0;
+async function fetchBuildStamp(): Promise<string> {
+  try { const r = await fetch('/api/health', { cache: 'no-store' }); const j = await r.json(); return String(j?.build || ''); } catch { return ''; }
+}
+async function checkForUpdate() {
+  const now = Date.now();
+  if (!bootedBuild || now - lastUpdateCheck < 60000) return;
+  lastUpdateCheck = now;
+  const b = await fetchBuildStamp();
+  if (!b || b === bootedBuild) return;
+  const ae = document.activeElement;
+  const typing = !!ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA');
+  if (typing || document.querySelector('.sheetWrap, .sheet, .modalOverlay')) return;
+  location.reload();
+}
+void fetchBuildStamp().then(b => { bootedBuild = b; });
+(window as any).__synCheckUpdate = checkForUpdate;
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') void checkForUpdate(); });
+window.addEventListener('focus', () => { void checkForUpdate(); });
+
 // boot, the current step is published on window.__synBootStep, and
 // window.__synBooted is set the moment the first screen renders.
 // /boot-watchdog.js (loaded before this bundle) watches those flags:

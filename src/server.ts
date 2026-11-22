@@ -1408,6 +1408,12 @@ app.get('/api/poly/history', rateLimit(120), async (req, res) => {
   if (!/^\d{10,}$/.test(tid)) { res.status(400).json({ error: 'bad token_id' }); return; }
   await polyProxy(res, `h${tid}${interval}${fidelity}`, `https://clob.polymarket.com/prices-history?market=${tid}&interval=${interval}&fidelity=${fidelity}`, 20000);
 });
+app.get('/api/poly/trades', rateLimit(120), async (req, res) => {
+  const cond = String(req.query.condition || '');
+  if (!/^0x[0-9a-fA-F]{64}$/.test(cond)) { res.status(400).json({ error: 'bad condition' }); return; }
+  const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 25));
+  await polyProxy(res, 't' + cond + ':' + limit, `https://data-api.polymarket.com/v2/trades?condition=${cond}&limit=${limit}`, 10000);
+});
 app.get('/api/poly/positions', rateLimit(60), async (req, res) => {
   const user = String(req.query.user || '');
   if (!/^0x[0-9a-fA-F]{40}$/.test(user)) { res.status(400).json({ error: 'bad address' }); return; }
@@ -1570,6 +1576,123 @@ function polySyncUnion() {
     if (stale.length) { try { polyUp.send(JSON.stringify({ assets_ids: [...polyUnion], type: 'market', custom_feature_enabled: true })); } catch { /* close handler retries */ } }
   }, 2600);
 }
+// ---- Chainlink price buffer (Polymarket real-time data socket) ----
+// The Up or Down markets resolve on Chainlink TWAP streams, so the
+// wallet's live ticker card reads that same stream: the current
+// price, the price to beat (the stream value at the window's start)
+// and the window's price path. The server keeps a per-symbol buffer
+// fed by Polymarket's RTDS socket. The buffer is snapshotted to
+// disk every few seconds and reloaded at boot: the socket's own
+// backfill only reaches ~1 minute back, so without the snapshot
+// every restart wiped the opening tick of the window in progress
+// and Price To Beat came up blank. Prices are public market data —
+// nothing per-user is stored.
+const CL_SYMBOLS = ['btc/usd', 'eth/usd', 'sol/usd', 'xrp/usd', 'doge/usd', 'hype/usd'];
+const CL_KEEP_MS = 2 * 60 * 60 * 1000;
+const clBuffers = new Map<string, { t: number; v: number }[]>();
+let clDirty = false;
+function clPush(sym: string, t: number, v: number) {
+  if (!Number.isFinite(t) || !Number.isFinite(v) || v <= 0) return;
+  let buf = clBuffers.get(sym);
+  if (!buf) { buf = []; clBuffers.set(sym, buf); }
+  const last = buf[buf.length - 1];
+  if (last && t <= last.t) return; // out-of-order or duplicate tick
+  buf.push({ t, v });
+  clDirty = true;
+  const cut = t - CL_KEEP_MS;
+  let drop = 0;
+  while (drop < buf.length && buf[drop].t < cut) drop++;
+  if (drop > 0) buf.splice(0, drop);
+}
+function clConnect() {
+  let ws: WsSocket;
+  try { ws = new WsSocket('wss://ws-live-data.polymarket.com'); } catch { setTimeout(clConnect, 5000); return; }
+  const retry = () => { try { ws.close(); } catch { /* already gone */ } setTimeout(clConnect, 5000); };
+  ws.on('open', () => {
+    try {
+      ws.send(JSON.stringify({
+        action: 'subscribe',
+        subscriptions: CL_SYMBOLS.map(symbol => ({ topic: 'crypto_prices_chainlink', type: 'update', filters: JSON.stringify({ symbol }) })),
+      }));
+    } catch { retry(); }
+  });
+  ws.on('message', (raw: Buffer) => {
+    try {
+      const msg = JSON.parse(raw.toString());
+      const p = msg && msg.payload;
+      if (!p) return;
+      if (Array.isArray(p.data)) {
+        // Subscribe backfill: per-second history for one symbol. The
+        // symbol rides on the enclosing message when present; the
+        // values themselves identify nothing, so attribute by the
+        // topic's symbol field if present, else skip attribution for
+        // symbols we cannot name (live updates carry their symbol).
+        const sym = typeof p.symbol === 'string' ? p.symbol : null;
+        if (sym && CL_SYMBOLS.includes(sym)) {
+          for (const pt of p.data) clPush(sym, Number(pt.timestamp), Number(pt.value));
+        }
+        return;
+      }
+      if (typeof p.symbol === 'string' && CL_SYMBOLS.includes(p.symbol)) clPush(p.symbol, Number(p.timestamp), Number(p.value));
+    } catch { /* a bad frame never kills the feed */ }
+  });
+  ws.on('error', retry);
+  ws.on('close', retry);
+}
+app.get('/api/poly/chainlink', rateLimit(240), (req, res) => {
+  const asset = String(req.query.symbol || '').toLowerCase();
+  const full = asset + '/usd';
+  if (!CL_SYMBOLS.includes(full)) { res.status(400).json({ error: 'unknown symbol' }); return; }
+  const start = Number(req.query.start) * 1000, end = Number(req.query.end) * 1000;
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) { res.status(400).json({ error: 'bad window' }); return; }
+  const buf = clBuffers.get(full) || [];
+  const now = Date.now();
+  const cur = buf.length ? buf[buf.length - 1] : null;
+  // Price to beat: the last stream value at or before the window's
+  // start. If the buffer begins just after the start (a restart gap
+  // the backfill could not cover), accept the first sample within
+  // five seconds; anything later would not be the opening value.
+  let beat: { t: number; v: number } | null = null;
+  for (const p of buf) { if (p.t <= start) beat = p; else break; }
+  if (!beat && buf.length && buf[0].t > start && buf[0].t <= start + 5000) beat = buf[0];
+  const win = buf.filter(p => p.t >= start && p.t <= Math.min(end, now));
+  const stride = Math.max(1, Math.floor(win.length / 160));
+  const samples = win.filter((_, i) => i % stride === 0 || i === win.length - 1).map(p => [p.t, p.v]);
+  res.json({
+    symbol: asset,
+    beat: beat ? beat.v : null,
+    current: cur && cur.t >= start - 60000 ? cur.v : null,
+    currentAt: cur ? cur.t : null,
+    samples,
+  });
+});
+// Buffer snapshot: reloaded at boot so a restart never blanks the
+// price to beat of the window in progress (see the header note).
+const CL_SNAP_PATH = path.join(process.cwd(), 'data', 'cl-buffer.json');
+function clLoadSnapshot() {
+  try {
+    const obj = JSON.parse(fs.readFileSync(CL_SNAP_PATH, 'utf8'));
+    for (const sym of CL_SYMBOLS) {
+      const arr = obj?.[sym];
+      if (Array.isArray(arr)) for (const pt of arr) clPush(sym, Number(pt?.t), Number(pt?.v));
+    }
+  } catch { /* no snapshot yet — the stream reseeds from backfill */ }
+}
+function clSaveSnapshot() {
+  if (!clDirty) return;
+  clDirty = false;
+  try {
+    fs.mkdirSync(path.dirname(CL_SNAP_PATH), { recursive: true });
+    const obj: Record<string, { t: number; v: number }[]> = {};
+    for (const [sym, buf] of clBuffers) obj[sym] = buf;
+    const tmp = CL_SNAP_PATH + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(obj));
+    fs.renameSync(tmp, CL_SNAP_PATH);
+  } catch { /* persistence is best-effort; the live buffer is unaffected */ }
+}
+clLoadSnapshot();
+setInterval(clSaveSnapshot, 5000);
+clConnect();
 function attachPolyRelay(server: http.Server | https.Server) {
   const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
   server.on('upgrade', (req, socket, head) => {
