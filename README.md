@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://r2.fivemanage.com/WD0UYkJxI50yH1OBccdt2/Logo-Transparent.png" alt="Syn Wallet" width="120">
+<img src="https://r2.fivemanage.com/WD0UYkJxI50yH1OBccdt2/gitbanner.png" alt="Syn Wallet" width="100%">
 
 # Syn Wallet
 
