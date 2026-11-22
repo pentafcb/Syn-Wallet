@@ -14,7 +14,7 @@
 ![Express](https://img.shields.io/badge/Express-4-000000?logo=express&logoColor=white)
 ![Platform](https://img.shields.io/badge/Platform-Web%20%2F%20PWA-silver)
 
-[Features](#features) · [Screenshots](#screenshots) · [Architecture](#architecture) · [Tech stack](#tech-stack) · [Security](#security-model) · [Getting started](#getting-started) · [Credits](#credits) · [License](#license)
+[Features](#features) · [Architecture](#architecture) · [Tech stack](#tech-stack) · [Security](#security-model) · [Getting started](#getting-started) · [Credits](#credits) · [License](#license)
 
 </div>
 
@@ -72,22 +72,6 @@ Syn Wallet is a full-featured web wallet for Solana, Bitcoin, and 20+ EVM networ
 <td>WalletConnect (Reown) pairing and request review — session proposals and signing requests queue in order and are approved or rejected on-device. Built-in Discover directory of dApps by category.</td>
 </tr>
 </table>
-
----
-
-## Screenshots
-
-Real captures of the running app live in the [`proof/`](proof/) directory:
-
-| File | Screen |
-| --- | --- |
-| `proof/01-onboarding.png` | Onboarding |
-| `proof/02-backup-blurred.png` | Recovery-phrase backup (blurred) |
-| `proof/03-set-password.png` | Set password |
-| `proof/04-home-orb-hero.png` | Home |
-| `proof/05-asset-ticker.png` | Asset detail with live ticker chart |
-| `proof/06-settings.png` | Settings |
-| `proof/07-unlock.png` | Unlock |
 
 ---
 
