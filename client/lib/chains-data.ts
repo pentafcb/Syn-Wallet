@@ -6,7 +6,8 @@
 // source, the UI shows the balance with price "—" rather than inventing one.
 export interface RegChain { chainId: number; name: string; symbol: string; rpc: string; explorer: string; cg: string; }
 export const EVM_REGISTRY: RegChain[] = [
-  { chainId: 999, name: 'HyperEVM', symbol: 'HYPE', rpc: 'https://rpc.hyperliquid.xyz/evm', explorer: 'https://hyperevmscan.io', cg: 'hyperliquid' },
+  { chainId: 999, name: 'HyperEVM', symbol: 'HYPE', rpc: '', explorer: 'https://hyperevmscan.io', cg: 'hyperliquid' },
+  { chainId: 4663, name: 'Robinhood Chain', symbol: 'ETH', rpc: '', explorer: '', cg: 'ethereum' },
   { chainId: 1101, name: 'Polygon zkEVM', symbol: 'ETH', rpc: 'https://zkevm-rpc.com', explorer: 'https://zkevm.polygonscan.com', cg: 'ethereum' },
   { chainId: 59144, name: 'Linea', symbol: 'ETH', rpc: 'https://rpc.linea.build', explorer: 'https://lineascan.build', cg: 'ethereum' },
   { chainId: 534352, name: 'Scroll', symbol: 'ETH', rpc: 'https://rpc.scroll.io', explorer: 'https://scrollscan.com', cg: 'ethereum' },
@@ -24,7 +25,7 @@ export const EVM_REGISTRY: RegChain[] = [
   { chainId: 1088, name: 'Metis Andromeda Mainnet', symbol: 'METIS', rpc: 'https://andromeda.metis.io/?owner=1088', explorer: 'https://andromeda-explorer.metis.io', cg: 'metis-token' },
   { chainId: 2222, name: 'Kava', symbol: 'KAVA', rpc: 'https://evm.kava.io', explorer: 'https://kavascan.com', cg: 'kava' },
   { chainId: 7000, name: 'ZetaChain Mainnet', symbol: 'ZETA', rpc: 'https://zetachain-evm.blockpi.network/v1/rpc/public', explorer: 'https://zetascan.com', cg: 'zetachain' },
-  { chainId: 204, name: 'opBNB Mainnet', symbol: 'BNB', rpc: 'https://opbnb-mainnet-rpc.bnbchain.org', explorer: 'https://opbnbscan.com', cg: 'binancecoin' },
+  { chainId: 204, name: 'opBNB Mainnet', symbol: 'BNB', rpc: '', explorer: 'https://opbnbscan.com', cg: 'binancecoin' },
   { chainId: 196, name: 'X Layer Mainnet', symbol: 'OKB', rpc: 'https://rpc.xlayer.tech', explorer: 'https://www.oklink.com/xlayer', cg: 'okb' },
   { chainId: 480, name: 'World Chain', symbol: 'ETH', rpc: 'https://worldchain-mainnet.g.alchemy.com/public', explorer: 'https://worldscan.org', cg: 'ethereum' },
   { chainId: 167000, name: 'Taiko', symbol: 'ETH', rpc: 'https://rpc.mainnet.taiko.xyz', explorer: 'https://taikoscan.io', cg: 'ethereum' },

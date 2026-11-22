@@ -548,7 +548,7 @@ function rebuildChains() {
   }
   for (const r of EVM_REGISTRY) {
     if (seenEvm.has(r.chainId)) continue; seenEvm.add(r.chainId);
-    out.push({ id: 'evm-' + r.chainId, name: r.name, symbol: r.symbol, cg: r.cg, decimals: 18, explorerAddr: r.explorer ? r.explorer + '/address/' : '', explorerTx: r.explorer ? r.explorer + '/tx/' : '', evmId: r.chainId, img: '', kind: 'evm', rpc: r.rpc });
+    out.push({ id: 'evm-' + r.chainId, name: r.name, symbol: r.symbol, cg: r.cg, decimals: 18, explorerAddr: r.explorer ? r.explorer + '/address/' : '', explorerTx: r.explorer ? r.explorer + '/tx/' : '', evmId: r.chainId, img: '', kind: 'evm', rpc: r.rpc, proxy: r.rpc === '' });
   }
   CHAINS = out;
 }

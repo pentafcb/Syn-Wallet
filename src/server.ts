@@ -628,6 +628,26 @@ const RPC_POOL_DEFS: Record<string, string[]> = {
   zksync: ['https://mainnet.era.zksync.io'],
   xrp: ['https://s1.ripple.com:51234', 'https://s2.ripple.com:51234', 'https://xrplcluster.com'],
 };
+// Alchemy (operator key, server-side only — it is never shipped to
+// a phone or written into this repo): prepended to the high-traffic
+// pools ahead of the public endpoints, which stay as fallbacks. The
+// evm-999 / evm-204 pools always exist so those chains can route
+// through /api/rpc; evm-4663 (Robinhood Chain) exists only with the
+// key, as no public endpoint for it is verified.
+RPC_POOL_DEFS['evm-999'] = ['https://rpc.hyperliquid.xyz/evm'];
+RPC_POOL_DEFS['evm-204'] = ['https://opbnb-mainnet-rpc.bnbchain.org'];
+const ALCHEMY_API_KEY = process.env.ALCHEMY_API_KEY || '';
+if (ALCHEMY_API_KEY) {
+  const alchemy = (host: string) => `https://${host}.g.alchemy.com/v2/${ALCHEMY_API_KEY}`;
+  const prepend = (chain: string, url: string) => { const defs = RPC_POOL_DEFS[chain]; if (defs && !defs.includes(url)) defs.unshift(url); };
+  prepend('solana', alchemy('solana-mainnet'));
+  prepend('ethereum', alchemy('eth-mainnet'));
+  prepend('polygon', alchemy('polygon-mainnet'));
+  prepend('base', alchemy('base-mainnet'));
+  prepend('evm-999', alchemy('hyperliquid-mainnet'));
+  prepend('evm-204', alchemy('opbnb-mainnet'));
+  RPC_POOL_DEFS['evm-4663'] = [alchemy('robinhood-mainnet')];
+}
 const rpcPools = new Map<string, RpcPool>();
 for (const [chain, urls] of Object.entries(RPC_POOL_DEFS)) rpcPools.set(chain, new RpcPool(poolUrls(chain, urls)));
 
@@ -1604,15 +1624,20 @@ function clPush(sym: string, t: number, v: number) {
   while (drop < buf.length && buf[drop].t < cut) drop++;
   if (drop > 0) buf.splice(0, drop);
 }
-function clConnect() {
+// RTDS honours only ONE crypto_prices_chainlink subscription per
+// connection (verified live 2026-11-21: with all six on one socket,
+// only one symbol streams — the rest get backfill once and then go
+// silent, which froze the ETH/SOL/XRP ticker cards). So each symbol
+// gets its own socket with its own reconnect loop.
+function clConnect(sym: string) {
   let ws: WsSocket;
-  try { ws = new WsSocket('wss://ws-live-data.polymarket.com'); } catch { setTimeout(clConnect, 5000); return; }
-  const retry = () => { try { ws.close(); } catch { /* already gone */ } setTimeout(clConnect, 5000); };
+  try { ws = new WsSocket('wss://ws-live-data.polymarket.com'); } catch { setTimeout(() => clConnect(sym), 5000); return; }
+  const retry = () => { try { ws.close(); } catch { /* already gone */ } setTimeout(() => clConnect(sym), 5000); };
   ws.on('open', () => {
     try {
       ws.send(JSON.stringify({
         action: 'subscribe',
-        subscriptions: CL_SYMBOLS.map(symbol => ({ topic: 'crypto_prices_chainlink', type: 'update', filters: JSON.stringify({ symbol }) })),
+        subscriptions: [{ topic: 'crypto_prices_chainlink', type: 'update', filters: JSON.stringify({ symbol: sym }) }],
       }));
     } catch { retry(); }
   });
@@ -1692,7 +1717,7 @@ function clSaveSnapshot() {
 }
 clLoadSnapshot();
 setInterval(clSaveSnapshot, 5000);
-clConnect();
+CL_SYMBOLS.forEach((sym, i) => setTimeout(() => clConnect(sym), i * 300));
 function attachPolyRelay(server: http.Server | https.Server) {
   const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
   server.on('upgrade', (req, socket, head) => {
