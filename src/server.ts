@@ -14,6 +14,7 @@ import { PublicKey } from '@solana/web3.js';
 import { getAssociatedTokenAddressSync } from '@solana/spl-token';
 import { BUILD_ID as STAMPED_BUILD_ID } from './build-id.js';
 import { CONNECT_HOSTS } from './csp-hosts.js';
+import { twConfigured, twCoinStatus, twValidate, twTickers } from './tw.js';
 
 // The build this server was compiled from (stamped at `npm run build`,
 // see scripts/stamp-build.mjs). Reported on /api/health so clients can
@@ -640,6 +641,42 @@ app.post('/api/rpc/:chain', async (req, res) => {
     res.status(status).type('application/json').send(text);
   } catch (e) { res.status(502).json({ jsonrpc: '2.0', id: (req.body as any)?.id ?? null, error: { code: -32000, message: String((e as Error).message) } }); }
 });
+// ---- Solana validators, trimmed + cached ----
+// getVoteAccounts returns EVERY vote account (thousands of entries,
+// megabytes of JSON) and the Stake screen only ever shows the top
+// 100 by stake — reading it through the phone was the screen's whole
+// load time. This endpoint does the read server-side once, trims to
+// the top 150 in the client's own ValidatorInfo shape, and caches
+// for 5 minutes (validator stakes move slowly); stale beats a 502.
+let stakeValCache: { at: number; body: string } | null = null;
+app.get('/api/stake/validators', async (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.type('application/json');
+  if (stakeValCache && Date.now() - stakeValCache.at < 300_000) { res.send(stakeValCache.body); return; }
+  const pool = rpcPools.get('solana');
+  if (!pool) { res.status(502).json({ error: 'no solana pool' }); return; }
+  try {
+    const { status, text } = await pool.post({ jsonrpc: '2.0', id: 1, method: 'getVoteAccounts', params: [] }, 25000);
+    if (status !== 200) throw new Error('rpc ' + status);
+    const result = JSON.parse(text)?.result;
+    const rows: { votePubkey: string; nodePubkey: string; activatedStakeSol: number; commission: number; delinquent: boolean }[] = [];
+    const push = (list: any, delinquent: boolean) => {
+      for (const v of (Array.isArray(list) ? list : [])) {
+        if (!v?.votePubkey) continue;
+        rows.push({ votePubkey: String(v.votePubkey), nodePubkey: String(v.nodePubkey || ''), activatedStakeSol: Number(v.activatedStake || 0) / 1e9, commission: Number(v.commission || 0), delinquent });
+      }
+    };
+    push(result?.current, false);
+    push(result?.delinquent, true);
+    rows.sort((a, b) => b.activatedStakeSol - a.activatedStakeSol);
+    const body = JSON.stringify(rows.slice(0, 150));
+    stakeValCache = { at: Date.now(), body };
+    res.send(body);
+  } catch {
+    if (stakeValCache) { res.send(stakeValCache.body); return; }
+    res.status(502).json({ error: 'validators unavailable' });
+  }
+});
 // UTXO-family data (Bitcoin + Litecoin) via keyless esplora-shaped
 // APIs with failover per chain. Litecoin's source is litecoinspace
 // (the mempool.space fork for LTC — same esplora response shapes,
@@ -914,6 +951,7 @@ app.get('/api/config', (_req, res) => {
   res.json({
     walletConnectProjectId: process.env.WALLETCONNECT_PROJECT_ID || '',
     moonpayPublishableKey: process.env.MOONPAY_PUBLISHABLE_KEY || '',
+    twApiConfigured: twConfigured(),
     polymarketBuilderConfigured: !!builderCreds(),
     // Public builder identity (operator config, not secrets): the
     // builder CODE is a public on-chain identifier that appears in
@@ -922,6 +960,41 @@ app.get('/api/config', (_req, res) => {
     polymarketBuilderCode: builderCode(),
     polymarketBuilderAddress: builderAddress(),
   });
+});
+
+// ---- Trust Wallet API proxy (optional operator data source) ----
+// Enabled only when TWAK_ACCESS_ID + TWAK_HMAC_SECRET are set in the
+// server environment (see src/tw.ts). The client never sees the keys —
+// only whether the source is configured. Asset ids are Trust Wallet's
+// public c{coinId}[_t{contract}] identifiers; the validate route takes
+// a public address the user is about to interact with, the same data
+// the client's existing GoPlus address check already sends out.
+const TW_ASSET_RE = /^c\d{1,12}(_t[0-9a-zA-Z.:_-]{1,90})?$/;
+app.post('/api/tw/tickers', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  if (!twConfigured()) return res.json({ configured: false, tickers: {} });
+  const assets = Array.isArray(req.body?.assets)
+    ? req.body.assets.filter((a: any) => typeof a === 'string' && TW_ASSET_RE.test(a)).slice(0, 50)
+    : [];
+  const tickers = await twTickers(assets);
+  return res.json({ configured: true, tickers });
+});
+app.get('/api/tw/coinstatus', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  if (!twConfigured()) return res.json({ configured: false, risk: null });
+  const asset = String(req.query.asset || '');
+  if (!TW_ASSET_RE.test(asset)) return res.status(400).json({ error: 'bad asset id' });
+  const risk = await twCoinStatus(asset);
+  return res.json({ configured: true, risk });
+});
+app.get('/api/tw/validate', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  if (!twConfigured()) return res.json({ configured: false, validation: null });
+  const asset = String(req.query.asset || '');
+  const address = String(req.query.address || '');
+  if (!TW_ASSET_RE.test(asset) || !address || address.length > 128) return res.status(400).json({ error: 'bad params' });
+  const validation = await twValidate(asset, address);
+  return res.json({ configured: true, validation });
 });
 
 // ---- Invest: Hyperliquid markets + account (Addition 6) ----

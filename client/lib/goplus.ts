@@ -5,12 +5,14 @@
 //   v2/token_approval_security    code 1 on chains 1, 56, 137, 42161, 8453;
 //                                 code 2018 ("main chain does not exist")
 //                                 on 10, 43114, 250, 324, 59144, 100, ...
-//   Solana token security         no working keyless endpoint (404/5000)
+//   Solana token security         no working keyless endpoint (404/5000) —
+//                                 mint/freeze authority is read on-chain
+//                                 instead (extractSolMintRisks below)
 // Every failure degrades to an honest "unavailable / not covered" state —
 // the UI never presents an unchecked item as checked, and never uses the
 // word "safe" as a verdict.
 
-export interface RiskReport { status: 'ok' | 'unavailable'; warnings: string[]; notes: string[]; reason?: string; }
+export interface RiskReport { status: 'ok' | 'unavailable'; warnings: string[]; notes: string[]; reason?: string; source?: string; }
 const GP1 = 'https://api.gopluslabs.io/api/v1';
 const GP2 = 'https://api.gopluslabs.io/api/v2';
 
@@ -53,6 +55,35 @@ export async function gpTokenRisk(evmId: number, contract: string): Promise<Risk
   if (!r) return { status: 'unavailable', warnings: [], notes: [], reason: 'GoPlus has no data for this contract.' };
   const { warnings, notes } = extractTokenRisks(r);
   return { status: 'ok', warnings, notes };
+}
+
+// ---- Solana mint risk (on-chain, no third party) ----
+// GoPlus serves no SPL token security on its free keyless API, but the
+// two signals that matter for a Solana token — mint authority and
+// freeze authority — live in the mint account itself. SPL Token mint
+// layout (82-byte base, identical for the classic Token program and
+// Token-2022's base mint):
+//    0..4   mintAuthority COption tag (u32 LE; 0 = none, 1 = some)
+//    4..36  mintAuthority pubkey (when tag = 1)
+//   36..44  supply (u64 LE)
+//   44      decimals
+//   45      isInitialized (0/1)
+//   46..50  freezeAuthority COption tag
+//   50..82  freezeAuthority pubkey (when tag = 1)
+// Returns null when the bytes are not a parseable initialized mint, so
+// the UI can degrade to an honest "unavailable" instead of guessing.
+export function extractSolMintRisks(data: Uint8Array): { warnings: string[]; notes: string[] } | null {
+  if (!data || data.length < 82) return null;
+  if (data[45] !== 1) return null;
+  const tag = (o: number) => data[o] | (data[o + 1] << 8) | (data[o + 2] << 16) | (data[o + 3] << 24);
+  const mintTag = tag(0); const freezeTag = tag(46);
+  if ((mintTag !== 0 && mintTag !== 1) || (freezeTag !== 0 && freezeTag !== 1)) return null;
+  const warnings: string[] = []; const notes: string[] = [];
+  if (freezeTag === 1) warnings.push('Freeze authority is active — the issuer can freeze token accounts, including yours.');
+  else notes.push('Freeze authority is revoked — the issuer cannot freeze your token account.');
+  if (mintTag === 1) notes.push('Mint authority is active — the issuer can create new supply, diluting holders.');
+  else notes.push('Mint authority is revoked — the issuer cannot increase the supply.');
+  return { warnings, notes };
 }
 
 // ---- address risk ----

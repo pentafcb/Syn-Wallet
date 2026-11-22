@@ -11,12 +11,13 @@ import { ed25519 } from '@noble/curves/ed25519';
 import { nameKindOf, looksLikeNameAttempt, snsDomainKey, snsOwnerFromAccountData, snsParentFromAccountData, snsReverseKey, snsNameFromReverseData, snsFavouriteKey, snsFavouriteNameAccount, SNS_ROOT, type NameKind } from './lib/names';
 import { parseSignInMessage, signInTimingProblem, looksLikeBlindBlob } from './lib/signing';
 import { computePresets, computeLegacyPresets, parseGwei, formatGwei, validateCustomFees, effectiveGasPriceWei, type FeeLevel, type FeePreset } from './lib/fees';
-import { gpTokenRisk, gpAddressRisk, gpApprovals, isUnlimitedAmount, formatTokenAmount, type RiskReport, type ApprovalRow } from './lib/goplus';
+import { gpTokenRisk, gpAddressRisk, gpApprovals, isUnlimitedAmount, formatTokenAmount, extractSolMintRisks, type RiskReport, type ApprovalRow } from './lib/goplus';
+import { twAssetId, twCoinRisk, twAddressVerdict, twTickers as twTickersFetch, setTwEnabled, twEnabled } from './lib/twapi';
 import { renderTickerChart, fmtUsd, fmtPrice, priceDp } from './lib/chart';
 import { CURRENCIES, currencyCode, currencySymbol, convertUsd, setCurrency, fetchFxRates, fxRateFor, effectiveCode, currencyDecimals } from './lib/currency';
 import { chainIcon, tokenIcon, chainIconUrl, tokenIconUrl, iconHTML, stackIconHTML, underlyingIcon, underlyingIconUrl, commodityIcon, stockIcon } from './lib/icons';
 import { TOKEN_CATALOG, POPULAR_TOKEN_IDS } from './lib/token-catalog';
-import { gammaEvents, clobBook, clobHistory, polyPositions, polyFeed, deriveClobCreds, buildSignedOrder, postOrder, getOpenOrders, cancelPolyOrder, verifyOrderSignature, limitRawAmounts, marketRawAmounts, walkPrice, roundConfigFor, relayerDeployed, CTF_EXCHANGE_V2, NEG_RISK_EXCHANGE_V2, PUSD, USDC_E, USDC_NATIVE, type PolyEvent, type PolyMarket, type PolyPosition, type PolyOpenOrder, type ClobCreds, type Book } from './lib/polymarket';
+import { gammaEvents, gammaEventBySlug, upDownSlug, parseUpDownSlug, UPDOWN_ASSETS, UPDOWN_TFS, clobBook, clobHistory, polyPositions, polyFeed, deriveClobCreds, buildSignedOrder, postOrder, getOpenOrders, cancelPolyOrder, verifyOrderSignature, limitRawAmounts, marketRawAmounts, walkPrice, roundConfigFor, relayerDeployed, CTF_EXCHANGE_V2, NEG_RISK_EXCHANGE_V2, PUSD, USDC_E, USDC_NATIVE, type PolyEvent, type PolyMarket, type PolyPosition, type PolyOpenOrder, type ClobCreds, type Book } from './lib/polymarket';
 import { hlInfo, hlPostL1, hlApproveAgent, hlOrderWire, hlOrderAction, hlUpdateLeverageAction, hlCancelAction, hlOrderStatusLines, hlAssetId, hlRoundPrice, hlRoundSize, hlEstLiqPx, HL_BRIDGE_ADDRESS, HL_ARBITRUM_USDC, HL_MIN_DEPOSIT_USDC, HL_MIN_ORDER_USD, type HlOrderWire } from './lib/hl';
 import { waveLoadHTML, waveLoadBlockHTML } from './lib/waveload';
 import { celebrateFx, cancelActiveFx, pressPulse, prefersReducedMotion } from './lib/fx';
@@ -25,7 +26,7 @@ import { mountPriceChart, type PriceChartHandle, type ScrubInfo } from './lib/pr
 import { parseRawAmount, rawToHuman, fmtRaw, normalizeJupiterQuote, normalizeLifiQuote, fetchJupiterQuote, fetchJupiterSwapTx, fetchLifiQuote, verifyLifiEvmTx, solSwapVerdict, LIFI_SOLANA_CHAIN_ID, LIFI_NATIVE_EVM, LIFI_NATIVE_SOL, JUP_SOL_MINT, type SwapQuote } from './lib/swap';
 import { STAKE_PROGRAM_ID, parseStakeAccountBytes, parseStakeAccountParsed, sortValidators, stakeStateOf, type StakeAccountInfo, type ValidatorInfo } from './lib/stake';
 import { METADATA_PROGRAM_ID, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, rewriteMediaUrl, parseMetaplexMetadata, metadataJsonFields, metadataAttributes, mediaCandidates, isSafeMediaUrl, safeMediaUrl, isSpamNft, normalizeBlockscoutNfts, type NftItem } from './lib/nfts';
-import { buildNamespaces, classifyRequest, parseWcEvmTx, decodeWcSignMessage, wcInit, wcPair, wcApprove, wcReject, wcRespond, wcRejectRequest, wcSessions, wcDisconnect, wcClientReady, wcWipeStorage, type WcAccounts } from './lib/walletconnect';
+import { buildNamespaces, classifyRequest, parseWcEvmTx, decodeWcSignMessage, decodeErc20Call, wcInit, wcPair, wcApprove, wcReject, wcRespond, wcRejectRequest, wcSessions, wcDisconnect, wcClientReady, wcWipeStorage, type WcAccounts } from './lib/walletconnect';
 import { buildPickerAssets, filterSendableAssets, sortPickerAssets, pickerChainId, type PickerAsset } from './lib/pickerassets';
 import { Connection, Keypair, PublicKey, SystemProgram, Transaction, VersionedTransaction, StakeProgram, Authorized, Lockup, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import { ethers } from 'ethers';
@@ -250,13 +251,22 @@ function recordCounterparty(addr: string) {
 }
 const DATA_CACHE_KEY = 'syn-wallet-data-cache-v1';
 function saveDataCache() {
-  try { localStorage.setItem(DATA_CACHE_KEY, JSON.stringify({ prices, balances: Object.fromEntries(balances), activity: Object.fromEntries(activityCache), tokens: Object.fromEntries(tokenBalances), explore: exploreVals, promo: promoPolyCache, nfts: nftItems ? { items: nftItems.slice(0, 300), notes: nftNotes, forKey: nftForKey } : undefined, accKey: accKey(), at: Date.now() })); } catch { /* storage full/blocked */ }
+  try {
+    // Validator list + identities are public network data, cached so
+    // the Stake screen paints instantly (names and icons included)
+    // on the next cold start instead of waiting on Solana reads.
+    let valInfo: [string, { name: string; skip: number | null; icon: string }][] | undefined;
+    if (validatorInfo && stakeValidators.length) { const keep = new Set(stakeValidators.map(v => v.votePubkey)); valInfo = [...validatorInfo.entries()].filter(([k]) => keep.has(k)); }
+    localStorage.setItem(DATA_CACHE_KEY, JSON.stringify({ prices, balances: Object.fromEntries(balances), activity: Object.fromEntries(activityCache), tokens: Object.fromEntries(tokenBalances), explore: exploreVals, promo: promoPolyCache, nfts: nftItems ? { items: nftItems.slice(0, 300), notes: nftNotes, forKey: nftForKey } : undefined, validators: stakeValidators.length ? stakeValidators.slice(0, 150) : undefined, valInfo, accKey: accKey(), at: Date.now() }));
+  } catch { /* storage full/blocked */ }
 }
 let pendingCache: any = null;
 function loadDataCache() {
   try {
     const j = JSON.parse(localStorage.getItem(DATA_CACHE_KEY) || 'null'); if (!j) return;
     if (j.prices) prices = j.prices; // prices are account-independent — safe to paint pre-unlock
+    if (Array.isArray(j.validators) && j.validators.length) { stakeValidators = j.validators.filter((v: any) => v && typeof v.votePubkey === 'string'); stakeValidatorsAt = typeof j.at === 'number' ? j.at : 0; }
+    if (Array.isArray(j.valInfo) && j.valInfo.length) validatorInfo = new Map(j.valInfo);
     pendingCache = j;
   } catch { /* ignore corrupt cache */ }
 }
@@ -298,6 +308,16 @@ function priceStateOf(cgId: string | undefined): LoadState {
   if (prices?.[cgId]?.usd != null) return 'ok';
   return pricesSettled ? 'failed' : 'pending';
 }
+// Price entry for a token: CoinGecko-keyed first; tokens CoinGecko
+// does not carry fall back to the Trust Wallet index entry, stored in
+// the same map under the token's TW asset id (see fetchPrices).
+function priceEntry(t: TokenDef): any | null {
+  if (t.cg) return prices?.[t.cg] ?? null;
+  const a = twAssetId(t.chainId, t.contract);
+  return a ? (prices?.[a] ?? null) : null;
+}
+function tokenUsd(t: TokenDef): number | null { const e = priceEntry(t); return e?.usd ?? null; }
+function tokenChg(t: TokenDef): number | null { const e = priceEntry(t); return e?.change24h ?? null; }
 function balStateOf(id: string): LoadState {
   if (balances.get(id) != null) return 'ok';
   return balances.has(id) ? 'failed' : 'pending';
@@ -580,7 +600,7 @@ function tokenShowsOnHome(t: TokenDef): boolean {
 }
 function tokenFiat(t: TokenDef): number | null {
   const b = tokenBalances.get(t.id); if (b == null) return null;
-  const pr = t.cg ? (prices?.[t.cg]?.usd ?? null) : null;
+  const pr = tokenUsd(t);
   return pr != null ? b * pr : null;
 }
 function homeTokenRowsHTML(): string {
@@ -1118,6 +1138,27 @@ async function fetchPrices() {
         if (r.ok) { const j = await r.json(); if (j && typeof j === 'object' && !j.error) prices = { ...(prices || {}), ...j }; }
       } catch { /* a failed chunk keeps last prices for its ids */ }
     }
+    // Trust Wallet index prices for the tokens CoinGecko does not
+    // carry (most of the long-tail catalog): ONE batched call through
+    // the server proxy, only when the operator configured TWAK keys.
+    // Entries land in the same map under the TW asset id, where
+    // priceEntry() finds them for tokens with no cg id.
+    if (twEnabled()) {
+      const byAsset = new Map<string, string>();
+      for (const t of visibleTokens()) {
+        if (t.cg) continue;
+        const a = twAssetId(t.chainId, t.contract);
+        if (a) byAsset.set(a, a);
+      }
+      const assets = [...byAsset.keys()].slice(0, 50);
+      if (assets.length) {
+        const tickers = await twTickersFetch(assets);
+        for (const a of assets) {
+          const e = tickers[a];
+          if (e) prices = { ...(prices || {}), [a]: { usd: e.usd, change24h: e.change24h ?? undefined, marketCap: e.marketCap ?? undefined, volume24h: e.volume24h ?? undefined } };
+        }
+      }
+    }
     saveDataCache();
   } catch { /* keep last */ }
   pricesSettled = true; // a full round completed — missing ids are now honestly "failed", not pending
@@ -1205,7 +1246,7 @@ function totalUsd(): { total: number | null; partial: boolean } {
   let total = 0, any = false, partial = false;
   for (const c of visibleChains()) { const b = balances.get(c.id); const p = priceOf(c);
     if (b == null || p == null) { if (balances.has(c.id) || b != null) partial = true; else if (b == null) partial = true; continue; } total += b * p; any = true; }
-  for (const t of visibleTokens()) { const tb = tokenBalances.get(t.id); const tp = t.cg ? prices?.[t.cg]?.usd : null; if (tb != null && tp != null) { total += tb * tp; any = true; } }
+  for (const t of visibleTokens()) { const tb = tokenBalances.get(t.id); const tp = tokenUsd(t); if (tb != null && tp != null) { total += tb * tp; any = true; } }
   return { total: any ? total : null, partial };
 }
 function priceOf(c: Chain): number | null { return c.cg ? (prices?.[c.cg]?.usd ?? null) : null; }
@@ -1924,12 +1965,12 @@ function paintHomeValues() {
     for (const t of shouldShow) {
       const row = tsec.querySelector(`[data-token="${t.id}"]`); if (!row) continue;
       const amount = tokenBalances.has(t.id) ? tokenBalances.get(t.id)! : null;
-      const tp = t.cg ? (prices?.[t.cg]?.usd ?? null) : null;
+      const tp = tokenUsd(t);
       const fiat = amount != null && tp != null ? amount * tp : null;
       flashSet(row.querySelector('[data-tok="usd"]'), 'tokusd:' + t.id, hideBal ? '••••' : fiat != null ? fmtUsd(fiat) : '—', hideBal ? null : fiat);
       const cr = row.querySelector('[data-tok="crypto"]'); if (cr) cr.textContent = hideBal ? '' : amount == null ? (priceStateOf(t.cg) === 'pending' ? 'Loading…' : 'Unavailable') : fmtCrypto(amount, t.symbol);
       const pr = row.querySelector('[data-tok="price"]'); if (pr) pr.textContent = tp != null ? fmtPrice(tp) : priceStateOf(t.cg) === 'pending' ? '…' : 'Price unavailable';
-      const cgEl = row.querySelector('[data-tok="chg"]'); if (cgEl) { const ch = t.cg ? (prices?.[t.cg]?.change24h ?? null) : null; const html = ch != null ? `<span class="chgPill ${ch >= 0 ? 'pos' : 'neg'}">${ch >= 0 ? '+' : ''}${ch.toFixed(2)}%</span>` : ''; if (cgEl.innerHTML !== html) cgEl.innerHTML = html; }
+      const cgEl = row.querySelector('[data-tok="chg"]'); if (cgEl) { const ch = tokenChg(t); const html = ch != null ? `<span class="chgPill ${ch >= 0 ? 'pos' : 'neg'}">${ch >= 0 ? '+' : ''}${ch.toFixed(2)}%</span>` : ''; if (cgEl.innerHTML !== html) cgEl.innerHTML = html; }
     }
     // One list for natives + tokens, sorted by value — but the DOM
     // order is only rewritten when the row SET changes (account
@@ -2462,11 +2503,12 @@ function isRawAddressFor(c: Chain, input: string): boolean {
 // ---------- GoPlus risk rendering (never a bare "safe" verdict) ----------
 function riskReportHTML(rep: RiskReport, subject: string): string {
   if (rep.status === 'unavailable') return `<p class="small muted" style="line-height:1.55"><i class="ri-shield-line"></i> Risk check unavailable — ${esc(rep.reason || 'the check could not be completed.')} Nothing here has been verified either way; do your own research.</p>`;
+  const src = rep.source ?? 'GoPlus';
   const parts: string[] = [];
-  if (rep.warnings.length) parts.push(`<div class="warn" style="margin:0 0 8px"><b>GoPlus flags for this ${esc(subject)}:</b><br>${rep.warnings.map(w => '• ' + esc(w)).join('<br>')}</div>`);
+  if (rep.warnings.length) parts.push(`<div class="warn" style="margin:0 0 8px"><b>${esc(src)} flags for this ${esc(subject)}:</b><br>${rep.warnings.map(w => '• ' + esc(w)).join('<br>')}</div>`);
   if (rep.notes.length) parts.push(`<p class="small muted" style="line-height:1.6">${rep.notes.map(n => '• ' + esc(n)).join('<br>')}</p>`);
-  if (!rep.warnings.length && !rep.notes.length) parts.push(`<p class="small muted" style="line-height:1.55">No risks found by GoPlus for this ${esc(subject)}. That is not a guarantee — always verify addresses and contracts yourself.</p>`);
-  else if (!rep.warnings.length) parts.push(`<p class="small muted" style="line-height:1.55">No risk flags from GoPlus for this ${esc(subject)} — the notes above are properties of the contract, not a guarantee of safety.</p>`);
+  if (!rep.warnings.length && !rep.notes.length) parts.push(`<p class="small muted" style="line-height:1.55">No risks found by ${esc(src)} for this ${esc(subject)}. That is not a guarantee — always verify addresses and contracts yourself.</p>`);
+  else if (!rep.warnings.length) parts.push(`<p class="small muted" style="line-height:1.55">No risk flags from ${esc(src)} for this ${esc(subject)} — the notes above are properties of the contract, not a guarantee of safety.</p>`);
   return parts.join('');
 }
 async function paintAddressRisk(el: HTMLElement | null, address: string, c: Chain) {
@@ -2480,6 +2522,15 @@ async function paintAddressRisk(el: HTMLElement | null, address: string, c: Chai
     : rep.warnings.length
       ? `<div class="err" style="margin:0">GoPlus flags this address: ${rep.warnings.map(esc).join(' · ')}. Think twice before sending.</div>`
       : '<p class="small muted">No risks found by GoPlus for this address. That is not a guarantee — verify every character yourself.</p>';
+  // Second source: Trust Wallet's address validation adds the
+  // sanctions/blacklist layer GoPlus's free check does not carry.
+  const verdict = await twAddressVerdict(c.id, address);
+  if (!verdict || !el.isConnected) return;
+  if (verdict.isSanctioned || verdict.result === 'blacklist') {
+    el.insertAdjacentHTML('beforeend', `<div class="err" style="margin-top:8px">Trust Wallet flags this address as ${verdict.isSanctioned ? 'sanctioned' : 'blacklisted'}${verdict.labels.length ? ` (${verdict.labels.map(esc).join(', ')})` : ''}. Do not send.</div>`);
+  } else if (verdict.result === 'whitelist') {
+    el.insertAdjacentHTML('beforeend', '<p class="small muted" style="margin-top:6px">Trust Wallet lists this address as known (whitelist).</p>');
+  }
 }
 
 // ---------- receive / send ----------
@@ -3170,7 +3221,7 @@ function actPriceUsd(rw: ActivityRow, c?: Chain): number | null {
   const sym = rw.sym; if (!sym || !c) return null;
   if (sym === c.symbol) return priceOf(c);
   const t = [...BUILTIN_TOKENS, ...config.tokens].find(t => t.chainId === c.id && t.symbol === sym);
-  return t?.cg ? (prices?.[t.cg]?.usd ?? null) : null;
+  return t ? tokenUsd(t) : null;
 }
 function actAmtText(a: number): string { if (a > 0 && a < 0.000001) return '<0.000001'; return trimNum(a, 6); }
 function actSign(rw: ActivityRow, dir: ActDir): string {
@@ -3963,11 +4014,11 @@ function paintTokenValues() {
   const grp = groupOf(t);
   const aggregated = grp.asset != null && grp.members.length > 1 && tokenFocusChain !== t.id;
   const gt = aggregated ? groupTotals(grp) : null;
-  const tb = aggregated ? gt!.amount : tokenBalances.get(t.id); const tp = t.cg ? prices?.[t.cg]?.usd : null;
+  const tb = aggregated ? gt!.amount : tokenBalances.get(t.id); const tp = tokenUsd(t);
   const un = priceStateOf(t.cg) === 'pending' ? '…' : 'Unavailable';
   const b = $('#tkBal'); if (b) b.textContent = tb == null ? ((aggregated ? gt!.pending : tokStateOf(t.id) === 'pending') ? 'Loading…' : 'Unavailable') : fmtCrypto(tb, t.symbol);
   const u = $('#tkUsd'); if (u) u.textContent = tb != null && tp != null ? fmtUsd(tb * tp) : '';
-  const d = t.cg ? prices?.[t.cg] : null;
+  const d = priceEntry(t);
   if (!chartScrubbing) {
     const eb = $('#tkEyebrow'); if (eb) eb.textContent = 'PRICE';
     const pv = $('#tkPriceVal'); if (pv) pv.textContent = tp != null ? fmtPrice(tp) : un;
@@ -3983,15 +4034,46 @@ function paintTokenValues() {
   set('#tkStMcap', d?.marketCap != null ? fmtMcap(d.marketCap) : un);
   paintMcapChg('tkMcapChg', d);
 }
-// GoPlus token risk for a token detail / import screen. Solana tokens get
-// an honest "unavailable": GoPlus serves no SPL token security on its free
-// keyless API (verified 2026-11-18 — its Solana endpoints error out).
+// Token risk for token detail / import screens and the swap review.
+// EVM tokens go through GoPlus; Solana tokens are checked ON-CHAIN —
+// GoPlus serves no SPL security on its free keyless API (verified
+// 2026-11-18), but the mint account itself carries the mint and freeze
+// authorities, which is what a Solana risk check actually needs.
+async function tokenRiskReport(contract: string, c: Chain): Promise<RiskReport> {
+  if (c.kind === 'solana' || c.kind === 'solana-tw') {
+    if (!contract || contract === 'native') return { status: 'unavailable', warnings: [], notes: [], reason: 'This is the native asset — there is no token mint to check.' };
+    try {
+      const info = await solanaRpcCall('getAccountInfo', [contract, { encoding: 'base64' }]);
+      const b64 = info?.value?.data?.[0];
+      if (typeof b64 !== 'string' || !b64) return { status: 'unavailable', warnings: [], notes: [], reason: 'The mint account could not be read on-chain.' };
+      const bytes = Uint8Array.from(atob(b64), (ch) => ch.charCodeAt(0));
+      const ex = extractSolMintRisks(bytes);
+      if (!ex) return { status: 'unavailable', warnings: [], notes: [], reason: 'This mint account could not be parsed.' };
+      return { status: 'ok', warnings: ex.warnings, notes: ex.notes, source: 'On-chain check' };
+    } catch { return { status: 'unavailable', warnings: [], notes: [], reason: 'The mint account could not be read (network error).' }; }
+  }
+  if (c.kind !== 'evm') return { status: 'unavailable', warnings: [], notes: [], reason: 'No token risk source covers this network.' };
+  if (!contract || contract === 'native') return { status: 'unavailable', warnings: [], notes: [], reason: 'This is the native asset — there is no token contract to check.' };
+  return gpTokenRisk(c.evmId!, contract);
+}
 async function paintTokenRisk(t: TokenDef, c: Chain) {
   const slot = $('#tkRiskSlot'); if (!slot) return;
-  if (c.kind === 'solana' || c.kind === 'solana-tw') { slot.innerHTML = riskReportHTML({ status: 'unavailable', warnings: [], notes: [], reason: 'GoPlus does not cover Solana tokens on its free API.' }, 'token'); return; }
-  if (c.kind !== 'evm') { slot.innerHTML = riskReportHTML({ status: 'unavailable', warnings: [], notes: [], reason: 'No token risk source covers this network.' }, 'token'); return; }
-  const rep = await gpTokenRisk(c.evmId!, t.contract);
+  const seq = ++riskPaintSeq;
+  const rep = await tokenRiskReport(t.contract, c);
   if (slot.isConnected) slot.innerHTML = riskReportHTML(rep, 'token');
+  void appendTwRisk(slot, t.contract, c, seq);
+}
+// Trust Wallet's token check runs as a SECOND source next to the
+// wallet's own (GoPlus / on-chain): appended under its own label when
+// the operator configured TWAK keys, skipped silently otherwise. A
+// paint sequence guards against a slow answer landing on a screen
+// the user has already left.
+let riskPaintSeq = 0;
+async function appendTwRisk(slot: HTMLElement, contract: string, c: Chain, seq: number) {
+  const rep = await twCoinRisk(c.id, contract);
+  if (!rep || seq !== riskPaintSeq || !slot.isConnected) return;
+  if (!rep.warnings.length && !rep.notes.length) return;
+  slot.insertAdjacentHTML('beforeend', `<div style="margin-top:10px">${riskReportHTML(rep, 'token')}</div>`);
 }
 function decodeErc20String(hex: string): string {
   try {
@@ -4216,7 +4298,7 @@ function showAddToken(err = '', stage?: { c: Chain; contract: string; meta: { na
 function showTokenSend(tokenId: string, err = '') {
   const t = findToken(tokenId); if (!t) { goTab('wallet'); return; }
   const c = findChain(t.chainId)!; const tb = tokenBalances.get(t.id);
-  const tp = t.cg ? prices?.[t.cg]?.usd ?? null : null;
+  const tp = tokenUsd(t);
   setView(`<main><button class="backBtn" id="bk" aria-label="Back"><i class="ri-arrow-left-s-line"></i></button>
   <div class="card" style="position:relative"><h1 class="heroH">Send <span>${esc(t.symbol)}</span></h1><p class="heroSub" style="margin-top:2px">On ${esc(c.name)} · Step 1 of 2</p>
   ${err ? `<div style="height:12px"></div><div class="err">${esc(err)}</div>` : ''}<div style="height:16px"></div>
@@ -4270,7 +4352,7 @@ function showTokenSend(tokenId: string, err = '') {
 }
 function showTokenConfirm(t: TokenDef, to: string, amtStr: string, err = '', nameLabel = '', poisonWarn = '') {
   const amt = parseFloat(amtStr) || 0; // display only — the signer receives amtStr verbatim (audit H-4)
-  const c = findChain(t.chainId)!; const tb = tokenBalances.get(t.id); const tp = t.cg ? prices?.[t.cg]?.usd : null;
+  const c = findChain(t.chainId)!; const tb = tokenBalances.get(t.id); const tp = tokenUsd(t);
   setView(`<main><button class="backBtn" id="bk" aria-label="Back"><i class="ri-arrow-left-s-line"></i></button>
   <div class="card" style="position:relative"><h1 class="heroH">Review <span>send</span></h1><p class="heroSub" style="margin-top:2px">Step 2 of 2</p><div style="height:8px"></div>${err ? `<div class="err">${esc(err)}</div>` : ''}
   <div class="sumAmt">${trimNum(amt, 8)} ${esc(t.symbol)}</div>
@@ -4635,14 +4717,14 @@ async function doRevoke(p: RevokePayload, feeOverrides: Record<string, bigint> =
 // operator's own free credentials, served by /api/config from server
 // environment variables. Empty = the feature stays honestly gated in
 // the UI. These are publishable identifiers, never secret keys.
-let featureCfg = { walletConnectProjectId: '', moonpayPublishableKey: '', polymarketBuilderConfigured: false, polymarketBuilderCode: '', polymarketBuilderAddress: '' };
+let featureCfg = { walletConnectProjectId: '', moonpayPublishableKey: '', polymarketBuilderConfigured: false, polymarketBuilderCode: '', polymarketBuilderAddress: '', twApiConfigured: false };
 let featureCfgLoaded = false;
 async function loadFeatureCfg(): Promise<void> {
   if (featureCfgLoaded) return;
   featureCfgLoaded = true;
   try {
     const r = await fetch('/api/config');
-    if (r.ok) { const j = await r.json(); featureCfg = { walletConnectProjectId: String(j?.walletConnectProjectId || ''), moonpayPublishableKey: String(j?.moonpayPublishableKey || ''), polymarketBuilderConfigured: !!j?.polymarketBuilderConfigured, polymarketBuilderCode: String(j?.polymarketBuilderCode || ''), polymarketBuilderAddress: String(j?.polymarketBuilderAddress || '') }; }
+    if (r.ok) { const j = await r.json(); featureCfg = { walletConnectProjectId: String(j?.walletConnectProjectId || ''), moonpayPublishableKey: String(j?.moonpayPublishableKey || ''), polymarketBuilderConfigured: !!j?.polymarketBuilderConfigured, polymarketBuilderCode: String(j?.polymarketBuilderCode || ''), polymarketBuilderAddress: String(j?.polymarketBuilderAddress || ''), twApiConfigured: !!j?.twApiConfigured }; setTwEnabled(featureCfg.twApiConfigured); }
   } catch { /* stays gated */ }
 }
 // The Solana keypair for a Solana-family chain of the ACTIVE wallet.
@@ -4933,7 +5015,7 @@ let swapErrKind: QuoteFailKind | '' = '';
 let lastQuoteAt = 0;     // last successful quote (drives tick re-quote debounce)
 function swapAssetPrice(a: SwapAsset): number | null {
   if (a.contract === 'native') { const c = findChain(a.chainId); return c ? priceOf(c) : null; }
-  if (a.tokenId) { const t = findToken(a.tokenId); return t?.cg ? (prices?.[t.cg]?.usd ?? null) : null; }
+  if (a.tokenId) { const t = findToken(a.tokenId); return t ? tokenUsd(t) : null; }
   return null;
 }
 function swapAssetState(a: SwapAsset): LoadState {
@@ -5245,10 +5327,12 @@ function showSwapConfirm(p: SwapConfirmPayload, err = '') {
     ${impact != null && impact > 15 ? '<div class="err" style="margin-top:12px">Price impact is over 15% — you would lose a large part of this trade\'s value to slippage. Strongly consider a smaller amount.</div>' : impact != null && impact > 5 ? '<div class="warn" style="margin-top:12px">High price impact (~' + impact.toFixed(1) + '%). You receive notably less than the spot value.</div>' : ''}
     ${p.from.contract === 'native' && fromBal != null && amtIn >= fromBal * 0.999 ? '<div class="warn" style="margin-top:12px">This uses essentially your whole ' + esc(p.from.symbol) + ' balance — network fees are also paid from it, so the swap may fail for fees. Leave a little behind.</div>' : ''}
     ${crossChain ? `<div class="warn" style="margin-top:12px">Cross-chain swap: after the source transaction confirms, the bridge delivers on ${esc(tc.name)}${q.etaSec ? ' — typically about ' + Math.max(1, Math.round(q.etaSec / 60)) + ' min' : ''}. Delivery is handled by the bridge protocol, not by Syn.</div>` : ''}
+    <div style="margin-top:12px"><p class="small muted" style="margin-bottom:6px">Token you receive — risk check</p><div id="swapRiskSlot"><p class="small muted">${waveLoadHTML()} Checking token risk…</p></div></div>
     ${needsApproval ? `<div id="apprZone" style="margin-top:12px"><p class="small muted">${waveLoadHTML()} Checking the token allowance for the LI.FI spender…</p></div>` : ''}
     <p class="securityNote" style="margin:12px 0">The transaction is built by the provider from this quote and signed locally on this device — your key never leaves it. Quotes move: if the market shifts beyond your slippage, the swap reverts instead of filling worse than the minimum.</p>
     <button class="ctaWide" id="swapGo">Swap ${esc(p.from.symbol)} → ${esc(p.to.symbol)}</button><div style="height:10px"></div><button class="btnGhost" id="swapCancel" style="border-radius:999px">Cancel</button></div></main>`);
   ($('#bk') as HTMLElement).onclick = () => goBack({ route: 'swap' }); ($('#swapCancel') as HTMLElement).onclick = () => goBack({ route: 'swap' });
+  { const slot = $('#swapRiskSlot'); if (slot) void (async () => { const seq = ++riskPaintSeq; const rep = await tokenRiskReport(p.to.contract, tc); if (slot.isConnected) slot.innerHTML = riskReportHTML(rep, 'token'); void appendTwRisk(slot, p.to.contract, tc, seq); })(); }
   let approvalOk = !needsApproval;
   if (needsApproval) {
     // Audit fix: while the allowance read is in flight the CTA was
@@ -5390,6 +5474,7 @@ async function doSwapExecute(p: SwapConfirmPayload): Promise<string> {
 // accounts are read with getProgramAccounts (jsonParsed, with a raw-bytes
 // fallback parser); activation state comes from getStakeActivation.
 let stakeValidators: ValidatorInfo[] = [];
+let stakeValidatorsAt = 0;
 // Addition 7: validator identity enrichment from the validators.app
 // public API (keyless, verified live). Names, avatar icons +
 // skipped-slot rate only — anything the API doesn't serve stays
@@ -5454,13 +5539,13 @@ async function fetchStakeAccounts(owner: string): Promise<{ info: StakeAccountIn
     } catch { /* both read paths may have failed — readOk decides */ }
   }
   if (!readOk) return null;
-  const out: { info: StakeAccountInfo; label: string; canDeactivate: boolean; canWithdraw: boolean }[] = [];
-  for (const info of infos) {
+  // Activation reads run in parallel — serially they cost one RPC
+  // round trip per stake account, straight onto the screen's load.
+  return Promise.all(infos.map(async (info) => {
     let act: any = null;
     try { act = await solanaRpcCall('getStakeActivation', [info.pubkey]); } catch { /* state unknown */ }
-    out.push({ info, ...stakeStateOf(info, act) });
-  }
-  return out;
+    return { info, ...stakeStateOf(info, act) };
+  }));
 }
 
 /** Compact activated-stake figure for validator rows: 812K / 1.24M. */
@@ -5485,8 +5570,10 @@ function showStake(chainId: string) {
   const owner = addressFor(c);
   const bal = balances.get(c.id);
   setView(`<main><button class="backBtn" id="bk" aria-label="Back"><i class="ri-arrow-left-s-line"></i></button>
-  <div class="card"><h1 class="heroH">Stake <span>SOL</span></h1><p class="heroSub" style="margin-top:2px">Native Solana staking — your SOL stays in your own stake account, delegated to a validator. Unstaking takes an epoch or two to cool down.</p>
-  <div style="height:10px"></div><div class="sumRow"><span class="sl">Available</span><span class="sv" id="stkBal">${bal == null ? '…' : trimNum(bal, 6) + ' SOL'}</span></div>
+  <h1 class="nftTitle">Stake SOL</h1>
+  <p class="pageSub">Native Solana staking — your SOL stays in your own stake account, delegated to a validator. Unstaking takes an epoch or two to cool down.</p>
+  <div class="setPanel"><div class="setH">Overview</div>
+  <div class="sumRow"><span class="sl">Available</span><span class="sv" id="stkBal">${bal == null ? '…' : trimNum(bal, 6) + ' SOL'}</span></div>
   <div class="sumRow"><span class="sl">Staked</span><span class="sv" id="stkStaked">${stakeListCache && stakeListCache.key === accKey() + ':' + c.id ? trimNum(stakeListCache.rows.reduce((a, r) => a + r.info.delegatedLamports, 0) / 1e9, 6) + ' SOL' : '…'}</span></div>
   <div class="sumRow" id="stkRewardsRow" hidden><span class="sl">Rewards · last epoch</span><span class="sv" id="stkRewards"></span></div>
   <div class="sumRow" id="stkLidoRow" hidden><span class="sl">Liquid staking · Lido</span><span class="sv" id="stkLidoVal"></span></div>
@@ -5539,6 +5626,9 @@ function showStake(chainId: string) {
     if (b != null && amt + 0.00228288 + 0.00001 > b) { err.innerHTML = '<div class="err">Amount + stake-account rent (0.00228 SOL) + fee exceeds your available SOL.</div>'; return; }
     go({ route: 'stakeconfirm', stakeConfirm: { chainId: c.id, action: 'create', amtStr, voter } }, $('#stkGo') as HTMLElement);
   };
+  // Cached validators paint immediately; the async block below
+  // refreshes them invisibly when the cache is stale.
+  if (stakeValidators.length) paintValidators();
   void (async () => {
     // Epoch strip: current epoch + progress through it (getEpochInfo).
     try {
@@ -5551,12 +5641,28 @@ function showStake(chainId: string) {
     } catch { /* strip stays empty */ }
   })();
   void (async () => {
-    if (!stakeValidators.length) {
-      try { const res = await solanaRpcCall('getVoteAccounts', []); stakeValidators = sortValidators(res, 100); } catch { /* list stays empty; paste path still works */ }
+    // Names + icons load IN PARALLEL from the start — they used to
+    // wait behind the vote-accounts read, so rows first painted with
+    // bare pubkeys and only re-painted once both had landed.
+    void loadValidatorInfo().then(() => { paintValidators(); if (stakeListCache && stakeListCache.key === accKey() + ':' + c.id) paintStakeAccounts(stakeListCache.rows); saveDataCache(); });
+    if (!stakeValidators.length || Date.now() - stakeValidatorsAt > 600_000) {
+      // The server's trimmed endpoint first (top validators in one
+      // small cached response); the raw getVoteAccounts read — every
+      // vote account, megabytes — is only the fallback, and only
+      // when there is no cached list to paint at all. A cached list
+      // older than 10 minutes refreshes invisibly in place.
+      let fresh: ValidatorInfo[] = [];
+      try {
+        const r = await fetch('/api/stake/validators', { signal: AbortSignal.timeout(20000) });
+        if (r.ok) { const arr = await r.json(); if (Array.isArray(arr)) fresh = arr.filter((v: any) => v && typeof v.votePubkey === 'string'); }
+      } catch { /* fall through to the direct read */ }
+      if (!fresh.length && !stakeValidators.length) {
+        try { const res = await solanaRpcCall('getVoteAccounts', []); fresh = sortValidators(res, 100); } catch { /* list stays as-is; paste path still works */ }
+      }
+      if (fresh.length) { stakeValidators = fresh; stakeValidatorsAt = Date.now(); saveDataCache(); }
     }
     if (!stakeSelVoter && stakeValidators.length) stakeSelVoter = stakeValidators[0].votePubkey;
     paintValidators();
-    void loadValidatorInfo().then(() => { paintValidators(); if (stakeListCache && stakeListCache.key === accKey() + ':' + c.id) paintStakeAccounts(stakeListCache.rows); });
     const b2 = balances.get(c.id); const el = $('#stkBal'); if (el && b2 != null) el.textContent = trimNum(b2, 6) + ' SOL';
   })();
   const paintStakeAccounts = (rows: { info: StakeAccountInfo; label: string; canDeactivate: boolean; canWithdraw: boolean }[]) => {
@@ -6221,12 +6327,49 @@ function wcRequestReview(req: any): { kind: string; title: string; body: string 
     const evmId = Number((chainId.split(':')[1] ?? '1'));
     const c = CHAINS.find(x => x.evmId === evmId);
     const eth = tx.value && tx.value !== '0x0' && tx.value !== '0' ? trimNum(Number(ethers.formatEther(BigInt(tx.value))), 8) : '0';
+    // Decode the standard ERC-20/721 calls so the review names what the
+    // call actually does — an unlimited approve must never hide inside
+    // raw calldata behind a generic "contract call" warning.
+    const dec = tx.data && tx.data !== '0x' ? decodeErc20Call(tx.data) : null;
+    const tok = c ? findTokenByContract(c.id, tx.to) : undefined;
+    const sym = tok ? tok.symbol : 'tokens';
+    const chip = (a: string) => `<span class="monoChip" style="max-width:210px" data-full="${esc(a)}">${esc(a.slice(0, 10))}…${esc(a.slice(-8))}</span>`;
+    const amtTxt = dec?.amount != null ? (tok ? `${formatTokenAmount(dec.amount, tok.decimals)} ${esc(tok.symbol)}` : `${dec.amount.toString()} base units (token unknown to this wallet — decimals not verified)`) : '';
+    let callHtml = '';
+    if (dec?.kind === 'approve') {
+      const unlimited = (dec.amount ?? 0n) >= (1n << 128n);
+      callHtml = `<div class="sumRow"><span class="sl">Call</span><span class="sv">Approve ${esc(sym)}</span></div>
+      <div class="sumRow"><span class="sl">Spender</span><span class="sv">${chip(dec.spender!)}</span></div>
+      <div class="sumRow"><span class="sl">Amount</span><span class="sv">${unlimited ? 'Unlimited' : amtTxt}</span></div>
+      ${unlimited
+        ? `<div class="err" style="margin-top:10px">UNLIMITED APPROVAL — this spender could move ALL of your ${esc(sym)} at any time, until you revoke it. Only approve if you fully trust this dApp; a limited approval is far safer.</div>`
+        : `<div class="warn" style="margin-top:10px">This approval lets the spender move up to the amount above of your ${esc(sym)}. Only approve if you trust the dApp and expected this.</div>`}`;
+    } else if (dec?.kind === 'transfer') {
+      callHtml = `<div class="sumRow"><span class="sl">Call</span><span class="sv">Transfer ${esc(sym)}</span></div>
+      <div class="sumRow"><span class="sl">Recipient</span><span class="sv">${chip(dec.to!)}</span></div>
+      <div class="sumRow"><span class="sl">Amount</span><span class="sv">${amtTxt}</span></div>
+      <div class="warn" style="margin-top:10px">This sends ${esc(sym)} out of your wallet to the recipient above. Verify both before approving.</div>`;
+    } else if (dec?.kind === 'transferFrom') {
+      callHtml = `<div class="sumRow"><span class="sl">Call</span><span class="sv">Transfer ${esc(sym)} (via allowance)</span></div>
+      <div class="sumRow"><span class="sl">From</span><span class="sv">${chip(dec.from!)}</span></div>
+      <div class="sumRow"><span class="sl">To</span><span class="sv">${chip(dec.to!)}</span></div>
+      <div class="sumRow"><span class="sl">Amount</span><span class="sv">${amtTxt}</span></div>
+      <div class="warn" style="margin-top:10px">This moves ${esc(sym)} using an existing allowance. Verify the sender, recipient and amount before approving.</div>`;
+    } else if (dec?.kind === 'setApprovalForAll') {
+      callHtml = `<div class="sumRow"><span class="sl">Call</span><span class="sv">${dec.approved ? 'Approve operator for ALL assets in a collection' : 'Revoke operator for a collection'}</span></div>
+      <div class="sumRow"><span class="sl">Operator</span><span class="sv">${chip(dec.operator!)}</span></div>
+      ${dec.approved
+        ? `<div class="err" style="margin-top:10px">This gives the operator control over EVERY asset you hold in this contract's collection — a classic drainer request. Reject unless you know exactly why a marketplace needs it.</div>`
+        : `<div class="warn" style="margin-top:10px">This revokes an operator's control over this collection. That is the safe direction, but verify the operator address.</div>`}`;
+    } else if (tx.data && tx.data !== '0x') {
+      callHtml = '<div class="warn" style="margin-top:10px">This is a contract call. The wallet cannot decode what this call does — only approve if you trust the dApp and expected this exact action.</div>';
+    }
     return { kind, title: kind === 'evm-send' ? 'Send transaction' : 'Sign transaction', body: `
       <div class="sumRow"><span class="sl">Network</span><span class="sv">${esc(c?.name ?? ('Chain ' + evmId))}</span></div>
       <div class="sumRow"><span class="sl">To</span><span class="sv"><span class="monoChip" style="max-width:210px" data-full="${esc(tx.to)}">${esc(tx.to.slice(0, 10))}…${esc(tx.to.slice(-8))}</span></span></div>
       <div class="sumRow"><span class="sl">Value</span><span class="sv">${eth} ${esc(c?.symbol ?? 'ETH')}</span></div>
       <div class="sumRow"><span class="sl">Call data</span><span class="sv"><span class="monoChip" style="max-width:210px" data-full="${esc(tx.data)}" data-trunc="${esc(tx.data.length > 42 ? tx.data.slice(0, 42) + '…' : tx.data)}">${esc(tx.data.length > 42 ? tx.data.slice(0, 42) + '…' : tx.data)}</span></span></div>
-      ${tx.data && tx.data !== '0x' ? '<div class="warn" style="margin-top:10px">This is a contract call. The wallet cannot decode what this call does — only approve if you trust the dApp and expected this exact action.</div>' : ''}` };
+      ${callHtml}` };
   }
   if (kind === 'sign-message') {
     const d = decodeWcSignMessage(method, params);
@@ -6612,7 +6755,7 @@ async function paintInvestCrypto(body: HTMLElement) {
     inWallet.push(`<button class="aRow" data-asset="${c.id}">${coinIcon(c)}<span class="aMid"><span class="aName">${esc(c.symbol)} <span class="aSym">${esc(c.name)}</span></span><span class="aSub"><span>${p != null ? fmtPrice(p) : 'Price unavailable'}</span> ${chgPill(changeOf(c))}</span></span><span class="aRight"><span class="amt">${b != null && p != null ? fmtUsd(b * p) : '—'}</span><span class="usd">${b == null ? '' : fmtCrypto(b, c.symbol)}</span></span><i class="ri-arrow-right-s-line aChev"></i></button>`);
   }
   for (const t of visibleTokens().filter(t => ourIds.has(t.chainId))) {
-    const tp = t.cg ? prices?.[t.cg]?.usd : null; const tb = tokenBalances.get(t.id);
+    const tp = tokenUsd(t); const tb = tokenBalances.get(t.id);
     if (q && !(t.name + ' ' + t.symbol).toLowerCase().includes(q)) continue;
     inWallet.push(`<button class="aRow" data-token2="${t.id}">${tokenIcon(t)}<span class="aMid"><span class="aName">${esc(t.symbol)} <span class="aSym">${esc(findChain(t.chainId)?.name || '')}</span></span><span class="aSub"><span>${tp != null ? fmtPrice(tp) : 'Price unavailable'}</span></span></span><span class="aRight"><span class="amt">${tb != null && tp != null ? fmtUsd(tb * tp) : '—'}</span><span class="usd">${tb == null ? '' : fmtCrypto(tb, t.symbol)}</span></span><i class="ri-arrow-right-s-line aChev"></i></button>`);
   }
@@ -6693,6 +6836,7 @@ async function paintInvestBstocks(body: HTMLElement) {
 // → the market detail screen.
 const POLY_CATS: { id: string; label: string; icon?: string }[] = [
   { id: 'trending', label: 'Trending', icon: 'ri-fire-line' },
+  { id: 'updown', label: 'Up or Down', icon: 'ri-time-line' },
   { id: 'politics', label: 'Politics' },
   { id: 'sports', label: 'Sports' },
   { id: 'crypto', label: 'Crypto' },
@@ -6703,7 +6847,9 @@ const POLY_CATS: { id: string; label: string; icon?: string }[] = [
   { id: 'esports', label: 'Esports' },
 ];
 let polyCat = 'trending';
-let polySel: { market: PolyMarket; eventTitle: string; outcomeIx: number } | null = null;
+let polySel: { market: PolyMarket; eventTitle: string; outcomeIx: number; updown?: { asset: string; tfSecs: number } } | null = null;
+let polyUpTf = 300; // Up or Down timeframe, seconds (5m default)
+let polyUdTimer: ReturnType<typeof setInterval> | null = null;
 let polyCreds: ClobCreds | null = null; // memory only, re-derived per session
 let polyListUnsubs: (() => void)[] = [];
 let polyDetailUnsubs: (() => void)[] = [];
@@ -6713,22 +6859,31 @@ let polyDetailUnsubs: (() => void)[] = [];
 // replacing the tab with an unreachable message.
 const polyListMem = new Map<string, PolyEvent[]>();
 let polyLastRendered: PolyEvent[] | null = null;
-function polyListCleanup() { for (const u of polyListUnsubs) { try { u(); } catch { /* already gone */ } } polyListUnsubs = []; }
+function polyListCleanup() { for (const u of polyListUnsubs) { try { u(); } catch { /* already gone */ } } polyListUnsubs = []; if (polyUdTimer) { clearInterval(polyUdTimer); polyUdTimer = null; } }
 function polyDetailCleanup() { for (const u of polyDetailUnsubs) { try { u(); } catch { /* already gone */ } } polyDetailUnsubs = []; }
 const polyPct = (p: number): string => p <= 0 ? '0%' : p >= 1 ? '100%' : (p * 100).toFixed(p < 0.1 ? 1 : 0) + '%';
 const polyPctNum = (p: number): string => polyPct(p).replace(/%$/, '');
 const polyCents = (p: number): string => (p * 100).toFixed(p > 0 && p < 0.1 ? 1 : 0) + '¢';
 const polyEnd = (iso: string): string => { const t = Date.parse(iso); if (!Number.isFinite(t)) return ''; const d = new Date(t); return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + (d.getFullYear() !== new Date().getFullYear() ? ' ' + d.getFullYear() : ''); };
 
-function polyGaugeSVG(p: number): string {
+function polyGaugeSVG(p: number, stroke = 'var(--silver)'): string {
   const arc = 59.69; const filled = Math.max(0, Math.min(1, p)) * arc;
-  return `<svg viewBox="0 0 48 26" fill="none" aria-hidden="true" class="polyGauge"><path d="M5 24A19 19 0 0 1 43 24" stroke="var(--fill06)" stroke-width="4" stroke-linecap="round"/><path d="M5 24A19 19 0 0 1 43 24" stroke="var(--silver)" stroke-width="4" stroke-linecap="round" stroke-dasharray="${filled.toFixed(1)} ${arc}"/></svg>`;
+  return `<svg viewBox="0 0 48 26" fill="none" aria-hidden="true" class="polyGauge"><path d="M5 24A19 19 0 0 1 43 24" stroke="var(--fill06)" stroke-width="4" stroke-linecap="round"/><path d="M5 24A19 19 0 0 1 43 24" stroke="${stroke}" stroke-width="4" stroke-linecap="round" stroke-dasharray="${filled.toFixed(1)} ${arc}"/></svg>`;
+}
+const isUpDown = (m: PolyMarket): boolean => m.outcomes.length === 2 && /^up$/i.test(m.outcomes[0] || '') && /^down$/i.test(m.outcomes[1] || '');
+// The mini-market-card's orb button pair, natively: a gradient orb
+// slot with a trend glyph on the first side, a flat slot on the
+// second, prices inside the labels. Used wherever a binary market's
+// outcomes are literally Up/Down.
+function polyOrbPills(m: PolyMarket): string {
+  return `<div class="polyPills">${m.outcomes.map((o, ix) => `<button class="orbBtn fillAction strokeLit${ix === 1 ? ' dim' : ''}" data-poly-go="${esc(m.conditionId)}:${ix}"><span class="orbSlot${ix === 0 ? ' orbBg' : ''}"><i class="${ix === 0 ? 'ri-arrow-right-up-line' : 'ri-arrow-right-down-line'}"></i></span><span class="orbLbl">${esc(o)} ${polyCents(m.prices[ix] ?? (ix === 0 ? 0 : 1 - (m.prices[0] ?? 0)))}</span></button>`).join('')}</div>`;
 }
 function polyMiniCard(e: PolyEvent, m: PolyMarket): string {
   const yes = m.prices[0] ?? 0;
-  return `<div class="polyCard" data-polym="${esc(m.conditionId)}" role="button" tabindex="0">
-    <div class="polyCardTop">${e.image ? `<span class="polyEvIc"><img class="coinImg" src="${esc(e.image)}" alt=""></span>` : ''}<span class="polyQ">${esc(m.question)}</span><span class="polyGaugeWrap">${polyGaugeSVG(yes)}<span class="polyGaugePct" data-poly-price="${esc(m.tokenIds[0] || '')}">${polyPct(yes)}</span></span></div>
-    <div class="polyPills"><button class="polyPill yes" data-poly-go="${esc(m.conditionId)}:0">${esc(m.outcomes[0] || 'Yes')} ${polyCents(yes)}</button><button class="polyPill no" data-poly-go="${esc(m.conditionId)}:1">${esc(m.outcomes[1] || 'No')} ${polyCents(m.prices[1] ?? (1 - yes))}</button></div>
+  const ud = isUpDown(m);
+  return `<div class="polyCard${ud ? ' fillPanel strokeLit' : ''}" data-polym="${esc(m.conditionId)}" role="button" tabindex="0">
+    <div class="polyCardTop">${e.image ? `<span class="polyEvIc"><img class="coinImg" src="${esc(e.image)}" alt=""></span>` : ''}<span class="polyQ">${esc(m.question)}</span><span class="polyGaugeWrap">${polyGaugeSVG(yes, ud ? '#3ddc84' : undefined)}<span class="polyGaugePct" data-poly-price="${esc(m.tokenIds[0] || '')}">${polyPct(yes)}</span>${ud ? `<span class="polyGaugeLbl">${esc(m.outcomes[0])}</span>` : ''}</span></div>
+    ${ud ? polyOrbPills(m) : `<div class="polyPills"><button class="polyPill yes" data-poly-go="${esc(m.conditionId)}:0">${esc(m.outcomes[0] || 'Yes')} ${polyCents(yes)}</button><button class="polyPill no" data-poly-go="${esc(m.conditionId)}:1">${esc(m.outcomes[1] || 'No')} ${polyCents(m.prices[1] ?? (1 - yes))}</button></div>`}
     <div class="polyCardFoot"><span>${fmtMcap(m.volume)} Vol.</span><span>Ends ${polyEnd(m.endDate || e.endDate)}</span></div>
   </div>`;
 }
@@ -6758,6 +6913,34 @@ function polyCardFor(e: PolyEvent): string {
   const isMatch = (polyCat === 'sports' || e.tags.includes('sports')) && /\s+vs\.?\s+/i.test(e.title) && m.outcomes.length === 2 && !/^yes$/i.test(m.outcomes[0] || '');
   if (e.markets.length === 1 && m.outcomes.length === 2) return isMatch ? polyMatchCard(e, m) : polyMiniCard(e, m);
   return polyEventCard(e);
+}
+
+// ---- Up or Down cards ----
+// One card per asset for the CURRENT window of the chosen timeframe.
+// The foot carries a live countdown (data-ud-end, ticked by the
+// section's 1s timer); when a window rolls, the section reloads
+// itself with the next window's markets.
+function fmtUdCountdown(ms: number): string {
+  const s = Math.max(0, Math.ceil(ms / 1000));
+  return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+}
+function udWindowLabel(m: PolyMarket, tfSecs: number): string {
+  const end = Date.parse(m.endDate); if (!Number.isFinite(end)) return '';
+  const f = (t: number) => new Date(t).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  return f(end - tfSecs * 1000) + ' – ' + f(end);
+}
+function udCells(m: PolyMarket): { mn: string; sc: string } {
+  const s = Math.max(0, Math.ceil((Date.parse(m.endDate) - Date.now()) / 1000));
+  return { mn: String(Math.floor(s / 60)).padStart(2, '0'), sc: String(s % 60).padStart(2, '0') };
+}
+function polyUpDownCard(e: PolyEvent, m: PolyMarket, assetName: string, symbol: string, tfLabel: string): string {
+  const up = m.prices[0] ?? 0;
+  const endMs = Date.parse(m.endDate || e.endDate);
+  return `<div class="polyCard fillPanel strokeLit" data-polym="${esc(m.conditionId)}" role="button" tabindex="0">
+    <div class="polyCardTop">${e.image ? `<span class="polyEvIc"><img class="coinImg" src="${esc(e.image)}" alt=""></span>` : ''}<span class="polyQ">${esc(symbol)} Up or Down ${esc(tfLabel)}</span><span class="polyGaugeWrap">${polyGaugeSVG(up, '#3ddc84')}<span class="polyGaugePct" data-poly-price="${esc(m.tokenIds[0] || '')}">${polyPct(up)}</span><span class="polyGaugeLbl">${esc(m.outcomes[0] || 'Up')}</span></span></div>
+    ${polyOrbPills(m)}
+    <div class="polyCardFoot"><span class="polyLiveTag"><span class="liveDotSm"></span>Live · ${esc(assetName)}</span><span data-ud-end="${endMs}">Ends in ${fmtUdCountdown(endMs - Date.now())}</span></div>
+  </div>`;
 }
 
 // Addition 10: positions design — money count-up (first paint per
@@ -6818,10 +7001,46 @@ async function paintInvestPoly(body: HTMLElement) {
     const slot = $('#polyPositions'); if (!slot || currentRoute !== 'invest' || investSection !== 'poly') return;
     if (!slot.innerHTML) slot.innerHTML = '<p class="small muted" style="padding:2px 16px 6px">Your positions couldn’t load right now — reopen this tab to retry.</p>';
   });
+  const paintUpDown = async () => {
+    polyListCleanup();
+    const slot = $('#polyList'); if (!slot || currentRoute !== 'invest' || investSection !== 'poly') return;
+    const note = $('#polyNote'); if (note) note.innerHTML = '';
+    const chips = `<div class="polyCats" style="padding-top:2px">${UPDOWN_TFS.map(t => `<button class="polyCat${t.secs === polyUpTf ? ' on' : ''}" data-udtf="${t.secs}"><span>${t.id}</span></button>`).join('')}</div>`;
+    const wireChips = () => slot.querySelectorAll('[data-udtf]').forEach(b => (b as HTMLElement).onclick = () => { polyUpTf = Number((b as HTMLElement).dataset.udtf) || 300; void paintUpDown(); });
+    slot.innerHTML = chips + `<div style="padding:6px 16px">${waveLoadBlockHTML('Loading…', true)}</div>`;
+    wireChips();
+    const tf = UPDOWN_TFS.find(t => t.secs === polyUpTf) || UPDOWN_TFS[0];
+    const evs = await Promise.all(UPDOWN_ASSETS.map(a => gammaEventBySlug(upDownSlug(a.slug, polyUpTf)).catch(() => null)));
+    if (!document.body.contains(slot) || currentRoute !== 'invest' || investSection !== 'poly' || polyCat !== 'updown') return;
+    const pairs = UPDOWN_ASSETS.map((a, i) => ({ a, e: evs[i] })).filter(x => x.e && x.e.markets.length);
+    if (!pairs.length) { slot.innerHTML = chips + '<p class="small muted secEmpty">Up or Down markets are unavailable right now.</p>'; wireChips(); return; }
+    slot.innerHTML = chips + `<div class="polyGrid">${pairs.map(({ a, e }) => polyUpDownCard(e!, e!.markets[0], a.name, a.symbol, tf.id)).join('')}</div>`;
+    wireChips();
+    const byCond = new Map<string, { e: PolyEvent; m: PolyMarket; asset: string }>();
+    for (const { a, e } of pairs) for (const m of e!.markets) byCond.set(m.conditionId, { e: e!, m, asset: a.slug });
+    const open = (cond: string, ix: number, el: HTMLElement) => { const hit = byCond.get(cond); if (hit) { polySel = { market: hit.m, eventTitle: hit.e.title, outcomeIx: ix, updown: { asset: hit.asset, tfSecs: polyUpTf } }; go({ route: 'polymarket' }, el); } };
+    slot.querySelectorAll('[data-poly-go]').forEach(b => (b as HTMLElement).onclick = (ev) => { ev.stopPropagation(); const [cond, ix] = ((b as HTMLElement).dataset.polyGo || '').split(':'); open(cond, Number(ix) || 0, b as HTMLElement); });
+    slot.querySelectorAll('[data-polym]').forEach(card => (card as HTMLElement).onclick = () => open((card as HTMLElement).dataset.polym!, 0, card as HTMLElement));
+    for (const { e } of pairs) { const m = e!.markets[0]; if (m?.tokenIds[0]) polyListUnsubs.push(polyFeed.subscribe(m.tokenIds[0], () => {
+      const q2 = polyFeed.quotes.get(m.tokenIds[0]); if (!q2) return;
+      const mid = q2.bestBid > 0 && q2.bestAsk > 0 ? (q2.bestBid + q2.bestAsk) / 2 : q2.lastTrade;
+      if (!mid) return;
+      slot.querySelectorAll(`[data-poly-price="${m.tokenIds[0]}"]`).forEach(el => { el.textContent = polyPct(mid); });
+    })); }
+    let rolling = false;
+    polyUdTimer = setInterval(() => {
+      if (!document.body.contains(slot)) { if (polyUdTimer) { clearInterval(polyUdTimer); polyUdTimer = null; } return; }
+      const now = Date.now();
+      let rolled = false;
+      slot.querySelectorAll('[data-ud-end]').forEach(el => { const end = Number((el as HTMLElement).dataset.udEnd); const left = end - now; (el as HTMLElement).textContent = left > 0 ? 'Ends in ' + fmtUdCountdown(left) : 'Ending…'; if (left <= 0) rolled = true; });
+      if (rolled && !rolling) { rolling = true; void paintUpDown(); }
+    }, 1000);
+  };
   const load = async () => {
     const slot = $('#polyList'); if (!slot || currentRoute !== 'invest' || investSection !== 'poly') return;
     const note = $('#polyNote');
     const q = investQuery.trim();
+    if (polyCat === 'updown' && q.length < 2) { await paintUpDown(); return; }
     const key = q.length >= 2 ? 'q:' + q.toLowerCase() : 'tag:' + polyCat;
     const render = (events: PolyEvent[]) => {
       polyLastRendered = events;
@@ -6999,6 +7218,9 @@ function drawPolyChart() {
   const Y = (v: number) => 10 + (1 - (v - min) / (max - min)) * (h - 24);
   ctx.strokeStyle = 'rgba(199,208,218,.10)'; ctx.fillStyle = 'rgba(147,169,192,.75)'; ctx.font = '9px Allo, sans-serif'; ctx.lineWidth = 1;
   for (let g = 0; g <= 3; g++) { const v = min + ((max - min) * g) / 3; const y = Y(v); ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(plotW, y); ctx.stroke(); ctx.fillText(polyPct(v), plotW + 6, y - 3); }
+  // The break-even line (the live-ticker-chart's dashed target,
+  // translated): 50% is where the market flips sides.
+  if (min < 0.5 && max > 0.5) { const y = Y(0.5); ctx.save(); ctx.setLineDash([4, 4]); ctx.strokeStyle = 'rgba(199,208,218,.45)'; ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(plotW, y); ctx.stroke(); ctx.restore(); }
   const grad = ctx.createLinearGradient(0, 0, 0, h); grad.addColorStop(0, 'rgba(199,208,218,.20)'); grad.addColorStop(1, 'rgba(199,208,218,0)');
   ctx.beginPath(); pts.forEach((p, i) => { const x = X(i); const y = Y(p.p); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
   ctx.strokeStyle = '#d7dee8'; ctx.lineWidth = 1.6; ctx.stroke();
@@ -7011,19 +7233,21 @@ function drawPolyChart() {
 function showPolyMarket() {
   const sel = polySel; if (!sel) { goTab('invest'); return; }
   const m = sel.market;
+  const ud = sel.updown ?? parseUpDownSlug(m.slug) ?? undefined;
   polyTrade = { side: 'BUY', mode: 'market', amount: '25', shares: '', limitCents: '' };
   polyMyPos = null;
   setView(`<main class="polyMain"><button class="backBtn" id="bk" aria-label="Back"><i class="ri-arrow-left-s-line"></i></button>
   <div style="padding:2px 16px 0"><div class="polyDetQ">${esc(m.question)}</div>
-  <div class="polyDetMeta"><span>${fmtMcap(m.volume)} Vol.</span><span class="polyMetaSep">·</span><span>Ends ${polyEnd(m.endDate)}</span><span class="polyMetaSep">·</span><span class="polyLiveState" id="polyLiveState"><span class="liveDotSm off"></span>Connecting</span></div></div>
-  <div class="polyOutPills" id="polyOutPills">${m.outcomes.map((o, ix) => `<button class="polyOutPill${ix === sel.outcomeIx ? ' on' : ''}" data-out="${ix}"><span>${esc(o)}</span><b data-poly-pill="${esc(m.tokenIds[ix] || '')}">${polyCents(m.prices[ix] ?? 0)}</b></button>`).join('')}</div>
+  <div class="polyDetMeta"><span>${fmtMcap(m.volume)} Vol.</span><span class="polyMetaSep">·</span>${ud ? `<span id="polyUdCount">Ends in ${fmtUdCountdown(Date.parse(m.endDate) - Date.now())}</span>` : `<span>Ends ${polyEnd(m.endDate)}</span>`}<span class="polyMetaSep">·</span><span class="polyLiveState" id="polyLiveState"><span class="liveDotSm off"></span>Connecting</span></div></div>
+  ${ud ? `<div class="polyUdStats"><div class="polyUdWin"><div class="udLbl">Window</div><div class="udVal">${esc(udWindowLabel(m, ud.tfSecs))}</div></div><div class="polyUdCount"><div class="cell"><div class="num" id="polyUdMin">${udCells(m).mn}</div><div class="unit">Mins</div></div><div class="cell"><div class="num" id="polyUdSec">${udCells(m).sc}</div><div class="unit">Secs</div></div></div></div>` : ''}
+  <div class="polyOutPills" id="polyOutPills">${m.outcomes.length === 2 ? m.outcomes.map((o, ix) => `<button class="orbBtn fillAction strokeLit${ix === sel.outcomeIx ? ' on' : ''}" data-out="${ix}"><span class="orbSlot"><i class="${isUpDown(m) ? (ix === 0 ? 'ri-arrow-right-up-line' : 'ri-arrow-right-down-line') : (ix === 0 ? 'ri-check-line' : 'ri-close-line')}"></i></span><span class="orbLbl">${esc(o)}</span><b class="orbCents" data-poly-pill="${esc(m.tokenIds[ix] || '')}">${polyCents(m.prices[ix] ?? 0)}</b></button>`).join('') : m.outcomes.map((o, ix) => `<button class="polyOutPill${ix === sel.outcomeIx ? ' on' : ''}" data-out="${ix}"><span>${esc(o)}</span><b data-poly-pill="${esc(m.tokenIds[ix] || '')}">${polyCents(m.prices[ix] ?? 0)}</b></button>`).join('')}</div>
   <div class="polyPriceBlock"><span class="polyBigWrap"><span class="polyBigPrice" id="polyBigPrice">${polyPctNum(m.prices[sel.outcomeIx] ?? 0)}</span><span class="polyBigPct">%</span></span><span class="polyChanceLine">chance · <span id="polyLastTrade">${m.lastTrade ? 'last ' + polyCents(m.lastTrade) : ''}</span></span></div>
-  <div class="polyChartWrap"><canvas id="polyChart"></canvas><div class="polyChartEmpty" id="polyChartEmpty">${waveLoadBlockHTML('Loading…', true)}</div></div>
+  <div class="polyChartWrap fillPanel strokeLit"><canvas id="polyChart"></canvas><div class="polyChartEmpty" id="polyChartEmpty">${waveLoadBlockHTML('Loading…', true)}</div></div>
   <div class="gGroup"><div class="gHead">Order book · <span id="polyBookOutcome">${esc(m.outcomes[sel.outcomeIx] || '')}</span></div><div class="gCard polyBookCard"><div id="polyBook">${waveLoadBlockHTML('Loading…', true)}</div></div></div>
   <div class="gGroup"><div class="gHead">Trade</div><div class="gCard polyPanel" style="padding:14px">
     <div class="polySideTabs"><button data-tside="BUY" class="on">Buy</button><button data-tside="SELL">Sell</button><span class="polyModeSeg"><button data-tmode="market" class="on">Market</button><button data-tmode="limit">Limit</button></span></div>
     <div id="polyLimitRow" style="display:none"><label class="polyFldLbl">Limit price (¢)</label><input id="polyLimitPx" class="polyIn" inputmode="decimal" placeholder="50"></div>
-    <div id="polyBuyAmt"><label class="polyFldLbl">Amount (pUSD)</label><div class="polyAmtWrap"><input id="polyAmt" class="polyIn" inputmode="decimal" value="25"><span class="polyPresets"><button data-preset="5">$5</button><button data-preset="25">$25</button><button data-preset="100">$100</button></span></div></div>
+    <div id="polyBuyAmt"><label class="polyFldLbl">Amount (pUSD)</label><div class="polyAmtWrap"><input id="polyAmt" class="polyIn" inputmode="decimal" value="25"></div><div class="polyPresetGrid">${[5, 25, 100].map(a => `<button class="polyPreset" data-preset="${a}"><span class="ppAmt">$${a}</span><span class="ppWin">win <b data-win="${a}">—</b></span></button>`).join('')}</div></div>
     <div id="polySellAmt" style="display:none"><label class="polyFldLbl">Shares</label><div class="polyAmtWrap"><input id="polyShares" class="polyIn" inputmode="decimal" placeholder="0"><button class="polyMaxBtn" id="polyMax" style="display:none">Max</button></div><div class="small muted" id="polyHoldLine"></div></div>
     <div class="polyEst" id="polyEst"></div>
     <div id="polyGateBox"><div style="padding:6px 0">${waveLoadBlockHTML()}</div></div>
@@ -7046,7 +7270,27 @@ function showPolyMarket() {
     return bk?.bids[0]?.price ?? q?.bestBid ?? m.prices[selected] ?? 0;
   };
   const paintBook = () => { const s = $('#polyBook'); if (s && currentRoute === 'polymarket') polyBookPaint(s, curBook(), tokenOf(selected)); const bo = $('#polyBookOutcome'); if (bo) bo.textContent = m.outcomes[selected] || ''; };
+  // Preset tiles carry the live "win" for their amount at the
+  // current book (the quick-trade-panel design) — recomputed wherever
+  // paintEst runs: feed ticks, book seeds, side/mode/input changes.
+  const paintPresets = () => {
+    document.querySelectorAll('[data-win]').forEach(el => {
+      const amt = parseFloat((el as HTMLElement).dataset.win || '0');
+      let txt = '—';
+      try {
+        const bk = curBook();
+        if (bk && amt > 0) {
+          let price = 0;
+          if (polyTrade.mode === 'market') { if (bk.asks.length) price = walkPrice(bk.asks.slice().sort((a, b) => b.price - a.price), 'BUY', amt, 'FOK'); }
+          else price = (parseFloat(polyTrade.limitCents) || 0) / 100;
+          if (price > 0 && price < 1) txt = fmtUsd(amt / price);
+        }
+      } catch { /* not enough liquidity for that size */ }
+      (el as HTMLElement).textContent = txt;
+    });
+  };
   const paintEst = () => {
+    paintPresets();
     const el = $('#polyEst'); if (!el) return;
     const bk = curBook();
     const err = (t: string) => { el.innerHTML = `<span class="muted">${t}</span>`; };
@@ -7123,6 +7367,39 @@ function showPolyMarket() {
   polyDetailUnsubs.push(polyFeed.onStatus(s => { const el = $('#polyLiveState'); if (el) el.innerHTML = s === 'live' ? '<span class="liveDotSm"></span>Live' : s === 'connecting' ? '<span class="liveDotSm off"></span>Connecting' : '<span class="liveDotSm off"></span>Offline'; }));
   void seedToken(selected);
   if (tokenOf(1 - selected)) void clobBook(tokenOf(1 - selected)).then(bk => polyFeed.books.set(tokenOf(1 - selected), bk)).catch(() => { /* seeded by the stream */ });
+  // Up or Down rollover: the window ends minutes after it opens, so
+  // the detail counts down and, at the boundary, swaps itself to the
+  // current window's market (same outcome side kept) instead of
+  // leaving the user trading a dead book. The next window's event
+  // exists on Gamma before the current one ends; if a fetch races
+  // it, the tick retries.
+  if (ud) {
+    let rolling = false;
+    const iv = setInterval(async () => {
+      if (currentRoute !== 'polymarket') { clearInterval(iv); return; }
+      const left = Date.parse(m.endDate) - Date.now();
+      const el = $('#polyUdCount');
+      if (el) el.textContent = left > 0 ? 'Ends in ' + fmtUdCountdown(left) : 'Ended — loading the current window…';
+      const mn = $('#polyUdMin'); const sc = $('#polyUdSec');
+      if (mn && sc) { const s = Math.max(0, Math.ceil(left / 1000)); mn.textContent = String(Math.floor(s / 60)).padStart(2, '0'); sc.textContent = String(s % 60).padStart(2, '0'); }
+      if (left <= 0 && !rolling) {
+        rolling = true;
+        try {
+          const next = await gammaEventBySlug(upDownSlug(ud.asset, ud.tfSecs));
+          const nm = next?.markets[0];
+          if (next && nm && nm.conditionId !== m.conditionId) {
+            polySel = { market: nm, eventTitle: next.title, outcomeIx: selected, updown: ud };
+            clearInterval(iv);
+            polyDetailCleanup();
+            showPolyMarket();
+            return;
+          }
+        } catch { /* retry on the next tick */ }
+        rolling = false;
+      }
+    }, 1000);
+    polyDetailUnsubs.push(() => clearInterval(iv));
+  }
   // His positions in this market (public read), painted per selected
   // outcome. Audit fix: the match is EXACTLY the selected outcome's
   // token — the old fallback to any position in the condition let the

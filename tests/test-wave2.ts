@@ -4,7 +4,7 @@ import bs58 from 'bs58';
 import { parseRawAmount, rawToHuman, fmtRaw, minOutFromBps, normalizeJupiterQuote, normalizeLifiQuote, LIFI_SOLANA_CHAIN_ID } from '../client/lib/swap.js';
 import { parseStakeAccountBytes, parseStakeAccountParsed, sortValidators, stakeStateOf, U64_MAX, type StakeAccountInfo } from '../client/lib/stake.js';
 import { rewriteMediaUrl, parseMetaplexMetadata, metadataJsonFields, normalizeBlockscoutNfts, mediaCandidates, isSpamNft } from '../client/lib/nfts.js';
-import { buildNamespaces, classifyRequest, parseWcEvmTx, decodeWcSignMessage, type WcAccounts } from '../client/lib/walletconnect.js';
+import { buildNamespaces, classifyRequest, parseWcEvmTx, decodeWcSignMessage, decodeErc20Call, type WcAccounts } from '../client/lib/walletconnect.js';
 
 // ---------- swap amount math (exact, no float drift) ----------
 assert.equal(parseRawAmount('1.5', 9), 1500000000n);
@@ -210,5 +210,30 @@ const data = lidoIface.encodeFunctionData('submit', [ethers.ZeroAddress]);
 assert.ok(data.startsWith('0xa1903eab'), 'submit(address) selector must be a1903eab');
 assert.equal(data.length, 2 + 8 + 64, 'selector + one 32-byte word');
 console.log('LIDO CALLDATA PASSED');
+
+// ---------- ERC-20 call decoding for the WC review ----------
+// approve(spender=0x7099…79C8, amount=1000) and an unlimited approve.
+const word = (hex: string) => hex.padStart(64, '0');
+const addrWord = (a: string) => word(a.replace(/^0x/, ''));
+const spender = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8';
+const appr = decodeErc20Call('0x095ea7b3' + addrWord(spender) + word((1000n).toString(16)))!;
+assert.equal(appr.kind, 'approve');
+assert.equal(appr.spender, spender.toLowerCase());
+assert.equal(appr.amount, 1000n);
+const apprMax = decodeErc20Call('0x095ea7b3' + addrWord(spender) + 'f'.repeat(64))!;
+assert.equal(apprMax.amount, (1n << 256n) - 1n, 'max uint256 approve decodes exactly');
+const tr = decodeErc20Call('0xa9059cbb' + addrWord(spender) + word((5n).toString(16)))!;
+assert.equal(tr.kind, 'transfer'); assert.equal(tr.to, spender.toLowerCase()); assert.equal(tr.amount, 5n);
+const tf = decodeErc20Call('0x23b872dd' + addrWord(spender) + addrWord(spender) + word((7n).toString(16)))!;
+assert.equal(tf.kind, 'transferFrom'); assert.equal(tf.from, spender.toLowerCase()); assert.equal(tf.amount, 7n);
+const saa = decodeErc20Call('0xa22cb465' + addrWord(spender) + word('1'))!;
+assert.equal(saa.kind, 'setApprovalForAll'); assert.equal(saa.operator, spender.toLowerCase()); assert.equal(saa.approved, true);
+const saaOff = decodeErc20Call('0xa22cb465' + addrWord(spender) + word('0'))!;
+assert.equal(saaOff.approved, false);
+assert.equal(decodeErc20Call('0x'), null, 'empty data decodes to null');
+assert.equal(decodeErc20Call('0xdeadbeef' + word('0')), null, 'unknown selector decodes to null');
+assert.equal(decodeErc20Call('0x095ea7b3' + addrWord(spender)), null, 'truncated approve decodes to null');
+assert.equal(decodeErc20Call('not hex'), null, 'non-hex decodes to null');
+console.log('ERC20 CALL DECODE PASSED');
 
 console.log('ALL WAVE 2 TESTS PASSED');

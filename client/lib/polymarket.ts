@@ -105,6 +105,48 @@ async function fetchJson(_url: string, proxyPath: string, timeoutMs = 12000): Pr
 }
 const gammaProxy = (p: string) => '/api/poly/gamma?path=' + encodeURIComponent(p);
 
+// ---- Up or Down: the short-window crypto series (5m / 15m / 1h) ----
+// These markets all carry Polymarket's own "hide-from-new" tag
+// (id 102169), which the browse query above excludes — the same
+// reason Polymarket's own homepage hides them: a fresh market every
+// few minutes per asset would flood any general list. They get a
+// dedicated view instead. Each window's event slug is deterministic
+// — {asset}-updown-{tf}-{windowStartUnix} — so the current window
+// is addressed directly, never searched for. Verified live against
+// Gamma for every asset/timeframe pair below.
+export interface UpDownAsset { slug: string; name: string; symbol: string }
+export const UPDOWN_ASSETS: UpDownAsset[] = [
+  { slug: 'btc', name: 'Bitcoin', symbol: 'BTC' },
+  { slug: 'eth', name: 'Ethereum', symbol: 'ETH' },
+  { slug: 'sol', name: 'Solana', symbol: 'SOL' },
+  { slug: 'xrp', name: 'XRP', symbol: 'XRP' },
+];
+export const UPDOWN_TFS: { id: string; secs: number }[] = [
+  { id: '5m', secs: 300 },
+  { id: '15m', secs: 900 },
+  { id: '1h', secs: 3600 },
+];
+export function upDownWindowStart(tfSecs: number, atMs = Date.now()): number {
+  return Math.floor(atMs / 1000 / tfSecs) * tfSecs;
+}
+export function upDownSlug(asset: string, tfSecs: number, atMs = Date.now()): string {
+  const tf = UPDOWN_TFS.find(t => t.secs === tfSecs);
+  const label = tf ? tf.id : `${Math.round(tfSecs / 60)}m`;
+  return `${asset}-updown-${label}-${upDownWindowStart(tfSecs, atMs)}`;
+}
+export function parseUpDownSlug(slug: string): { asset: string; tfSecs: number } | null {
+  const mm = /^([a-z0-9]+)-updown-(5m|15m|1h)-\d+$/.exec(slug || '');
+  if (!mm) return null;
+  const tf = UPDOWN_TFS.find(t => t.id === mm[2]);
+  return tf ? { asset: mm[1], tfSecs: tf.secs } : null;
+}
+export async function gammaEventBySlug(slug: string): Promise<PolyEvent | null> {
+  const p = `/events?slug=${encodeURIComponent(slug)}`;
+  const j = await fetchJson(GAMMA + p, gammaProxy(p));
+  const evs = (Array.isArray(j) ? j : []).map(parseEvent).filter((e: PolyEvent) => e.markets.length);
+  return evs[0] ?? null;
+}
+
 export async function gammaEvents(params: { tag?: string; search?: string; limit?: number }): Promise<PolyEvent[]> {
   const limit = params.limit || 24;
   if (params.search) {

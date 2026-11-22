@@ -140,6 +140,58 @@ export function parseWcEvmTx(params: any): WcEvmTx | null {
   return { from: s(t.from), to: s(t.to), value: s(t.value) || '0x0', data: s(t.data) || '0x', gas: s(t.gas) || s(t.gasLimit) };
 }
 
+export interface DecodedErc20Call {
+  kind: 'approve' | 'transfer' | 'transferFrom' | 'setApprovalForAll';
+  spender?: string; to?: string; from?: string; operator?: string;
+  amount?: bigint; approved?: boolean;
+}
+/**
+ * Decode the ERC-20 / ERC-721 calls a dApp most commonly asks a wallet
+ * to sign, so the review screen can show exactly what the call does
+ * instead of raw calldata. Anything else (or malformed data) returns
+ * null and the review falls back to its generic contract-call warning.
+ * Addresses are returned lowercase; amounts as raw base-unit bigints.
+ */
+export function decodeErc20Call(data: string): DecodedErc20Call | null {
+  if (typeof data !== 'string') return null;
+  const h = data.replace(/^0x/, '');
+  if (!/^[0-9a-fA-F]+$/.test(h) || h.length < 8) return null;
+  const sel = h.slice(0, 8).toLowerCase();
+  const word = (i: number): string | null => {
+    const w = h.slice(8 + i * 64, 8 + (i + 1) * 64);
+    return w.length === 64 ? w : null;
+  };
+  const addr = (i: number): string | null => {
+    const w = word(i); if (!w) return null;
+    return '0x' + w.slice(24).toLowerCase();
+  };
+  const uint = (i: number): bigint | null => {
+    const w = word(i); if (!w) return null;
+    try { return BigInt('0x' + w); } catch { return null; }
+  };
+  if (sel === '095ea7b3') { // approve(address spender, uint256 amount)
+    const spender = addr(0); const amount = uint(1);
+    if (!spender || amount === null) return null;
+    return { kind: 'approve', spender, amount };
+  }
+  if (sel === 'a9059cbb') { // transfer(address to, uint256 amount)
+    const to = addr(0); const amount = uint(1);
+    if (!to || amount === null) return null;
+    return { kind: 'transfer', to, amount };
+  }
+  if (sel === '23b872dd') { // transferFrom(address from, address to, uint256 amount)
+    const from = addr(0); const to = addr(1); const amount = uint(2);
+    if (!from || !to || amount === null) return null;
+    return { kind: 'transferFrom', from, to, amount };
+  }
+  if (sel === 'a22cb465') { // setApprovalForAll(address operator, bool approved)
+    const operator = addr(0); const flag = uint(1);
+    if (!operator || flag === null) return null;
+    return { kind: 'setApprovalForAll', operator, approved: flag !== 0n };
+  }
+  return null;
+}
+
 function hexToUtf8(hex: string): string | null {
   try {
     const h = hex.replace(/^0x/, '');

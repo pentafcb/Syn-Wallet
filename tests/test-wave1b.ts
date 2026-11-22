@@ -3,7 +3,7 @@ import { PublicKey } from '@solana/web3.js';
 import { nameKindOf, looksLikeNameAttempt, snsDomainKey, snsOwnerFromAccountData, snsParentFromAccountData, snsReverseKey, snsNameFromReverseData, snsFavouriteKey, snsFavouriteNameAccount, SNS_ROOT } from '../client/lib/names.js';
 import { buildSignInMessage, parseSignInMessage, signInTimingProblem, looksLikeBlindBlob, type SignInFields } from '../client/lib/signing.js';
 import { computePresets, computeLegacyPresets, parseGwei, formatGwei, validateCustomFees, effectiveGasPriceWei } from '../client/lib/fees.js';
-import { extractTokenRisks, extractAddressRisks, normalizeApprovals, isUnlimitedAmount, formatTokenAmount } from '../client/lib/goplus.js';
+import { extractTokenRisks, extractAddressRisks, normalizeApprovals, isUnlimitedAmount, formatTokenAmount, extractSolMintRisks } from '../client/lib/goplus.js';
 
 // ---------- name classification ----------
 assert.equal(nameKindOf('vitalik.eth'), 'ens');
@@ -138,6 +138,31 @@ assert.equal(normalizeApprovals(null).length, 0);
 assert.equal(normalizeApprovals([]).length, 0);
 // Allowance formatting / unlimited detection
 assert.equal(isUnlimitedAmount('-1'), true, 'GoPlus -1 means unlimited');
+// ---------- Solana mint authority extraction (SPL mint layout) ----------
+// Build an 82-byte mint account: COption tags u32 LE at 0 (mint) and 46
+// (freeze), isInitialized at 45.
+const mintBytes = (mintTag: number, freezeTag: number, init = 1, len = 82) => {
+  const b = new Uint8Array(len);
+  b[0] = mintTag; b[45] = init; b[46] = freezeTag; b[44] = 6;
+  return b;
+};
+const revoked = extractSolMintRisks(mintBytes(0, 0))!;
+assert.equal(revoked.warnings.length, 0, 'fully revoked mint has no warnings');
+assert.equal(revoked.notes.length, 2, 'revoked mint reports both revocations as notes');
+assert.ok(revoked.notes.some(n => n.includes('Freeze authority is revoked')));
+assert.ok(revoked.notes.some(n => n.includes('Mint authority is revoked')));
+const circleLike = extractSolMintRisks(mintBytes(1, 1))!;
+assert.equal(circleLike.warnings.length, 1, 'active freeze authority is the warning');
+assert.ok(circleLike.warnings[0].includes('Freeze authority is active'));
+assert.ok(circleLike.notes.some(n => n.includes('Mint authority is active')));
+const mintOnly = extractSolMintRisks(mintBytes(1, 0))!;
+assert.equal(mintOnly.warnings.length, 0);
+assert.ok(mintOnly.notes.some(n => n.includes('Mint authority is active')));
+assert.equal(extractSolMintRisks(mintBytes(0, 0, 0)), null, 'uninitialized mint is not parseable');
+assert.equal(extractSolMintRisks(new Uint8Array(40)), null, 'short account is not a mint');
+assert.equal(extractSolMintRisks(mintBytes(7, 0)), null, 'unknown COption tag is not parseable');
+assert.ok(extractSolMintRisks(mintBytes(0, 0, 1, 165)) !== null, 'Token-2022 length mints parse by the same base layout');
+console.log('SOLANA MINT RISK PASSED');
 assert.equal(isUnlimitedAmount((2n ** 256n - 1n).toString()), true, 'uint256 max is unlimited');
 assert.equal(isUnlimitedAmount('4000'), false);
 assert.equal(isUnlimitedAmount(''), false);

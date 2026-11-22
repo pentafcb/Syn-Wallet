@@ -18,7 +18,7 @@
     "qrcode": "^1.5.4",
     "ws": "^8.21.0"
   },
-  "description": "Syn Wallet — public non-custodial multi-chain crypto wallet. Keys never leave the browser.",
+  "description": "Syn Wallet \u2014 public non-custodial multi-chain crypto wallet. Keys never leave the browser.",
   "devDependencies": {
     "@types/express": "^4.17.21",
     "@types/node": "^22.5.0",
@@ -38,7 +38,7 @@
     "build:client": "node scripts/stamp-build.mjs && vite build && node scripts/stamp-integrity.mjs",
     "build:server": "tsc -p tsconfig.server.json",
     "start": "node dist/server.js",
-    "test": "tsx tests/test-polymarket.ts && tsx tests/test-derivation.ts && tsx tests/test-vault.ts && tsx tests/test-wave1a.ts && tsx tests/test-wave1b.ts && tsx tests/test-ohlc.ts && tsx tests/test-wave2.ts && tsx tests/test-audit.ts && tsx tests/test-currency.ts && tsx tests/test-picker.ts && tsx tests/test-utxo.ts && tsx tests/test-hl.ts && tsx tests/test-integrity.ts"
+    "test": "tsx tests/test-polymarket.ts && tsx tests/test-derivation.ts && tsx tests/test-vault.ts && tsx tests/test-wave1a.ts && tsx tests/test-wave1b.ts && tsx tests/test-ohlc.ts && tsx tests/test-wave2.ts && tsx tests/test-audit.ts && tsx tests/test-currency.ts && tsx tests/test-picker.ts && tsx tests/test-utxo.ts && tsx tests/test-hl.ts && tsx tests/test-integrity.ts && tsx tests/test-tw.ts && tsx tests/test-updown.ts"
   },
   "type": "module",
   "version": "1.0.0",
