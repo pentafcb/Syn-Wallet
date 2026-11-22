@@ -166,4 +166,12 @@ The interface is hand-built in vanilla TypeScript and CSS — no UI framework �
 
 ## License
 
-No license file is included at this time; the source is published for review. All rights reserved by the author unless a license is added later.
+Syn Wallet is released under the [PolyForm Noncommercial License 1.0.0](LICENSE).
+
+In plain terms:
+
+- **No commercial use.** You may not sell this software, offer it as a paid product or service, or use it for any other commercial purpose.
+- **Credit is required.** Anyone who receives a copy must also receive the license terms and the Required Notice: *Copyright 2026 Syn — Syn Wallet*.
+- **Noncommercial use is welcome.** Personal use, research, study, hobby projects, and use by charitable, educational, public research, public safety or health, environmental, or government organizations are permitted purposes.
+
+See the full text in [LICENSE](LICENSE).
