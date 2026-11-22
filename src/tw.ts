@@ -53,7 +53,12 @@ function cached<T>(key: string, ttlMs: number, fn: () => Promise<T | null>): Pro
   if (hit && Date.now() - hit.at < ttlMs) return Promise.resolve(hit.v as T);
   return throughQueue(async () => {
     const v = await fn();
-    if (v !== null && v !== undefined) cache.set(key, { at: Date.now(), v });
+    if (v !== null && v !== undefined) {
+      // Bounded (audit 2026-11-21): keys carry user addresses — an
+      // unbounded map retains them indefinitely and grows to OOM.
+      if (!cache.has(key) && cache.size >= 500) { const first = cache.keys().next().value; if (first !== undefined) cache.delete(first); }
+      cache.set(key, { at: Date.now(), v });
+    }
     return v;
   });
 }

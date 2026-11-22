@@ -103,7 +103,7 @@ export function mountPriceChart(host: HTMLElement, opts: PriceChartOpts): PriceC
   const canvas = host.querySelector('.pchartCanvas') as HTMLCanvasElement;
   const tabsEl = host.querySelector('.pchartTabs') as HTMLElement | null;
   let pill = host.querySelector('.pchartPill') as HTMLElement | null;
-  const tabBtns: HTMLElement[] = [...host.querySelectorAll('.pchartTab')];
+  const tabBtns: HTMLElement[] = [...host.querySelectorAll<HTMLElement>('.pchartTab')];
   const ctx = canvas.getContext('2d')!;
 
   const period = (): ChartPeriod | undefined => periods.find(p => p.value === sel) || periods[0];
@@ -314,7 +314,7 @@ export function mountPriceChart(host: HTMLElement, opts: PriceChartOpts): PriceC
         tabsEl.innerHTML = `<span class="pchartPill"></span>${periods.map(p => `<button class="pchartTab ${p.value === sel ? 'on' : ''}" data-p="${escHtml(p.value)}" role="tab" aria-selected="${p.value === sel}">${escHtml(TAB_LABEL[p.value] || p.label)}</button>`).join('')}`;
         pill = tabsEl.querySelector('.pchartPill') as HTMLElement | null;
         tabBtns.length = 0;
-        tabBtns.push(...tabsEl.querySelectorAll('.pchartTab'));
+        tabBtns.push(...tabsEl.querySelectorAll<HTMLElement>('.pchartTab'));
         bindTabs();
       } else {
         tabBtns.forEach(x => { const on = x.dataset.p === sel; x.classList.toggle('on', on); x.setAttribute('aria-selected', String(on)); });

@@ -251,6 +251,17 @@ export function wcInit(projectId: string, handlers: WcHandlers): Promise<any> {
   initPromise.catch(() => { initPromise = null; });
   return initPromise;
 }
+// Audit fix: the lazy @walletconnect/utils import in the reject /
+// disconnect paths had no timeout — on a stalled chunk download the
+// review sheet hung forever on Reject/Disconnect. Race it; callers
+// treat these as best-effort and surface the timeout as a failure.
+const WC_UTILS_TIMEOUT_MS = 15000;
+async function wcUtils(): Promise<any> {
+  return Promise.race([
+    import('@walletconnect/utils'),
+    new Promise((_, rej) => setTimeout(() => rej(new Error('WalletConnect utilities did not load in time.')), WC_UTILS_TIMEOUT_MS)),
+  ]);
+}
 export async function wcPair(uri: string): Promise<void> {
   if (!client) throw new Error('WalletConnect is not initialised.');
   await client.pair({ uri });
@@ -261,7 +272,7 @@ export async function wcApprove(id: number, namespaces: Record<string, any>): Pr
 }
 export async function wcReject(id: number): Promise<void> {
   if (!client) return;
-  const { getSdkError } = await import('@walletconnect/utils');
+  const { getSdkError } = await wcUtils();
   await client.reject({ id, reason: getSdkError('USER_REJECTED') });
 }
 export async function wcRespond(topic: string, id: number, result: any): Promise<void> {
@@ -270,7 +281,7 @@ export async function wcRespond(topic: string, id: number, result: any): Promise
 }
 export async function wcRejectRequest(topic: string, id: number): Promise<void> {
   if (!client) return;
-  const { getSdkError } = await import('@walletconnect/utils');
+  const { getSdkError } = await wcUtils();
   await client.respond({ topic, response: { id, error: getSdkError('USER_REJECTED'), jsonrpc: '2.0' } });
 }
 export function wcSessions(): any[] {
@@ -278,7 +289,7 @@ export function wcSessions(): any[] {
 }
 export async function wcDisconnect(topic: string): Promise<void> {
   if (!client) return;
-  const { getSdkError } = await import('@walletconnect/utils');
+  const { getSdkError } = await wcUtils();
   await client.disconnect({ topic, reason: getSdkError('USER_DISCONNECTED') });
 }
 

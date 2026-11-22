@@ -581,6 +581,11 @@ class RpcPool {
       try {
         const r = await fetch(m.url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) });
         const text = await r.text();
+        // Audit 2026-11-21: responses were buffered whole with no
+        // cap — a heavy upstream answer (wide log scans, vote-account
+        // dumps) could park tens of MB per request in memory. 16MB is
+        // far above any answer this wallet consumes.
+        if (text.length > 16_000_000) { return { status: 413, text: JSON.stringify({ jsonrpc: '2.0', id: (body as any)?.id ?? null, error: { code: -32000, message: 'upstream response too large' } }), url: m.url }; }
         if (r.status === 429 || r.status >= 500) { this.bad(m); lastErr = new Error(`rpc http ${r.status}`); continue; }
         this.good(m);
         return { status: r.status, text, url: m.url };
@@ -653,9 +658,21 @@ for (const [chain, urls] of Object.entries(RPC_POOL_DEFS)) rpcPools.set(chain, n
 
 // ---- RPC proxy (forwards JSON-RPC verbatim through the chain's pool; no
 // key material ever) ----
-app.post('/api/rpc/:chain', async (req, res) => {
+// Audit 2026-11-21: this route fronts the operator's paid Alchemy
+// key and accepted ANY JSON-RPC method at the global 600/min — an
+// open quota tap for the heaviest scan methods. It now carries its
+// own 300/min bucket (far above a real wallet session) and refuses
+// the known account-scan methods outright; the app never issues
+// them (balances go through the balance service / bounded calls).
+const RPC_BLOCKED_METHODS = new Set(['getprogramaccounts', 'gettokenaccountsbyowner', 'gettokenaccountsbydelegate', 'getlargestaccounts', 'getclusternodes']);
+app.post('/api/rpc/:chain', rateLimit(300), async (req, res) => {
   const pool = rpcPools.get(String(req.params.chain || ''));
   if (!pool) { res.status(400).json({ error: 'unknown chain' }); return; }
+  const calls = Array.isArray(req.body) ? req.body : [req.body];
+  for (const c of calls) {
+    const m = typeof (c as any)?.method === 'string' ? ((c as any).method as string).toLowerCase() : '';
+    if (!m || RPC_BLOCKED_METHODS.has(m)) { res.status(403).json({ jsonrpc: '2.0', id: (c as any)?.id ?? null, error: { code: -32601, message: 'method not allowed on this relay' } }); return; }
+  }
   try {
     const { status, text } = await pool.post(req.body || {}, 15000);
     res.status(status).type('application/json').send(text);
@@ -769,7 +786,7 @@ app.get('/api/utxo/:chain/fees', async (req, res) => {
     res.json({ satVb: Math.max(1, Math.ceil(v)) });
   } catch { res.status(502).json({ error: 'Fee data unavailable' }); }
 });
-app.post('/api/utxo/:chain/tx', async (req, res) => {
+app.post('/api/utxo/:chain/tx', rateLimit(60), async (req, res) => {
   const hex = String((req.body as any)?.hex || '');
   if (!/^[0-9a-fA-F]{100,200000}$/.test(hex)) { res.status(400).json({ error: 'invalid tx hex' }); return; }
   try { const txid = await utxoPostTx(String(req.params.chain), hex.toLowerCase()); res.json({ txid }); }
@@ -1105,7 +1122,7 @@ app.get('/api/hl/candles', async (req, res) => {
     const raw = await hlPost({ type: 'candleSnapshot', req: { type: 'candleSnapshot', coin, interval, startTime: start, endTime: end } });
     const candles = (Array.isArray(raw) ? raw : []).map((k: any) => ({ time: Number(k.t), open: parseFloat(k.o), high: parseFloat(k.h), low: parseFloat(k.l), close: parseFloat(k.c), volume: parseFloat(k.v || '0') })).filter((c: any) => c.time > 0 && c.close > 0);
     const data = { coin, interval, candles };
-    hlCandleCache.set(key, { at: Date.now(), data });
+    cacheSet(hlCandleCache, key, { at: Date.now(), data }, 300);
     res.json(data);
   } catch {
     // Throttled upstream: serve the last good candles (any age)
@@ -1146,7 +1163,7 @@ app.get('/api/hl/account/:address', rateLimit(60), async (req, res) => {
     let spotUsdc = 0;
     try { const spot = await hlPost({ type: 'spotClearinghouseState', user: address }); const b = (spot?.balances || []).find((x: any) => x.coin === 'USDC'); if (b) spotUsdc = parseFloat(b.total || '0'); } catch { /* spot is optional */ }
     const data = { any: any || spotUsdc > 0, accountValue: totalValue, unrealizedPnl: totalUpnl, spotUsdc, positions, at: Date.now() };
-    hlAccountCache.set(address.toLowerCase(), { at: Date.now(), data });
+    cacheSet(hlAccountCache, address.toLowerCase(), { at: Date.now(), data }, 200);
     res.json(data);
   } catch { res.status(502).json({ error: 'hyperliquid unavailable' }); }
 });
@@ -1400,6 +1417,15 @@ app.get('/api/bstocks', async (_req, res) => {
 // direct wss upgrade to Polymarket while this server's upstream
 // connection is clean. Public market data only — no user data and no
 // credentials ever pass through these routes.
+// Audit 2026-11-21: several caches were keyed by user/attacker-
+// controlled values (addresses, gamma paths, token ids) and never
+// evicted — unbounded growth toward OOM, and address-keyed user
+// data retained in memory indefinitely, against the local-only
+// design. cacheSet bounds every such map (oldest entry evicted).
+function cacheSet<K, V>(map: Map<K, V>, key: K, val: V, max: number) {
+  if (!map.has(key) && map.size >= max) { const first = map.keys().next().value; if (first !== undefined) map.delete(first as K); }
+  map.set(key, val);
+}
 const polyCache = new Map<string, { at: number; body: string; status: number }>();
 async function polyProxy(res: Response, cacheKey: string, url: string, ttlMs: number) {
   const hit = polyCache.get(cacheKey);
@@ -1407,7 +1433,7 @@ async function polyProxy(res: Response, cacheKey: string, url: string, ttlMs: nu
   try {
     const r = await fetch(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(10000) });
     const body = await r.text();
-    if (r.ok) polyCache.set(cacheKey, { at: Date.now(), body, status: r.status });
+    if (r.ok) cacheSet(polyCache, cacheKey, { at: Date.now(), body, status: r.status }, 400);
     res.status(r.status).type('json').send(body);
   } catch { if (hit) { res.status(hit.status).type('json').send(hit.body); return; } res.status(502).json({ error: 'polymarket upstream unavailable' }); }
 }
@@ -1467,7 +1493,7 @@ app.get('/api/poly/positions', rateLimit(60), async (req, res) => {
     // The merged body holds every page, so its pagination must say
     // so — a stale has_more:true from page 1 would lie to callers.
     const body = JSON.stringify(envelope ? { ...envelope, data: all, pagination: { ...((envelope as any).pagination ?? {}), has_more: false, next_cursor: null } } : all);
-    polyCache.set(key, { at: Date.now(), body, status: 200 });
+    cacheSet(polyCache, key, { at: Date.now(), body, status: 200 }, 400);
     res.status(200).type('json').send(body);
   } catch { if (hit) { res.status(hit.status).type('json').send(hit.body); return; } res.status(502).json({ error: 'polymarket upstream unavailable' }); }
 });
@@ -1520,7 +1546,14 @@ app.post('/api/polymarket/sign', rateLimit(60), (req, res) => {
   const creds = builderCreds();
   if (!creds) { res.status(503).json({ error: 'builder_not_configured' }); return; }
   const { method, path: rpath, body } = (req.body || {}) as { method?: unknown; path?: unknown; body?: unknown };
-  if (typeof method !== 'string' || !/^(GET|POST|DELETE)$/.test(method) || typeof rpath !== 'string' || !rpath.startsWith('/') || rpath.length > 300 || (body !== undefined && typeof body !== 'string')) { res.status(400).json({ error: 'bad sign request' }); return; }
+  // Audit 2026-11-21 (P0): this endpoint was an unauthenticated
+  // signing oracle — any method, any path, any body — and it returns
+  // the builder API key + passphrase alongside the HMAC, so arbitrary
+  // Builder/Relayer API actions could be minted by anyone. The app
+  // has exactly ONE consumer (relayerSubmit → POST /submit), so the
+  // oracle is now pinned to that single operation; anything else is
+  // refused before any credential material is touched.
+  if (method !== 'POST' || rpath !== '/submit' || typeof body !== 'string' || body.length > 64 * 1024) { res.status(400).json({ error: 'bad sign request' }); return; }
   const ts = Math.floor(Date.now() / 1000);
   const message = `${ts}${method}${rpath}${typeof body === 'string' ? body : ''}`;
   const sig = createHmac('sha256', Buffer.from(creds.secret, 'base64')).update(message).digest('base64').replace(/\+/g, '-').replace(/\//g, '_');
@@ -1540,7 +1573,10 @@ let polyPingTimer: ReturnType<typeof setInterval> | null = null;
 function polySendStatus() { const m = JSON.stringify({ event_type: 'relay_status', state: polyUpOpen ? 'live' : 'connecting' }); for (const c of polyClients.keys()) if (c.readyState === 1) { try { c.send(m); } catch { /* closing */ } } }
 function polyUpstreamConnect() {
   if (polyUp && (polyUp.readyState === 0 || polyUp.readyState === 1)) return;
-  const up = new WsSocket('wss://ws-subscriptions-clob.polymarket.com/ws/market');
+  // handshakeTimeout: without it a hung handshake leaves readyState
+  // stuck at CONNECTING and the guard above blocks every reconnect
+  // until a process restart (audit 2026-11-21).
+  const up = new WsSocket('wss://ws-subscriptions-clob.polymarket.com/ws/market', { handshakeTimeout: 10000 });
   polyUp = up;
   up.on('open', () => {
     polyUpOpen = true; polyRetryMs = 1000;
@@ -1631,8 +1667,14 @@ function clPush(sym: string, t: number, v: number) {
 // gets its own socket with its own reconnect loop.
 function clConnect(sym: string) {
   let ws: WsSocket;
-  try { ws = new WsSocket('wss://ws-live-data.polymarket.com'); } catch { setTimeout(() => clConnect(sym), 5000); return; }
-  const retry = () => { try { ws.close(); } catch { /* already gone */ } setTimeout(() => clConnect(sym), 5000); };
+  // handshakeTimeout: a hung TLS/WS handshake otherwise parks the
+  // socket in CONNECTING forever (audit 2026-11-21).
+  try { ws = new WsSocket('wss://ws-live-data.polymarket.com', { handshakeTimeout: 10000 }); } catch { setTimeout(() => clConnect(sym), 5000); return; }
+  // `ws` emits BOTH 'error' and 'close' for one failure — without
+  // this guard each failure scheduled two reconnects, then four,
+  // then eight (audit 2026-11-21).
+  let gone = false;
+  const retry = () => { if (gone) return; gone = true; try { ws.close(); } catch { /* already gone */ } setTimeout(() => clConnect(sym), 5000); };
   ws.on('open', () => {
     try {
       ws.send(JSON.stringify({
@@ -1724,7 +1766,28 @@ function attachPolyRelay(server: http.Server | https.Server) {
     if ((req.url || '').split('?')[0] !== '/api/poly/ws') { socket.destroy(); return; }
     wss.handleUpgrade(req, socket, head, (c) => wss.emit('connection', c, req));
   });
-  wss.on('connection', (c: WsSocket) => {
+  // Audit 2026-11-21: the relay had no connection bound and no
+  // liveness reaping — dead half-open clients accumulated forever
+  // and the union (and fan-out cost) grew with them. Cap total and
+  // per-IP connections, and ping/reap on a 30s heartbeat.
+  const clientIps = new Map<WsSocket, string>();
+  const heartbeat = setInterval(() => {
+    for (const c of polyClients.keys()) {
+      if ((c as any).isAlive === false) { try { c.terminate(); } catch { /* gone */ } continue; }
+      (c as any).isAlive = false;
+      try { c.ping(); } catch { /* close handler cleans up */ }
+    }
+  }, 30000);
+  heartbeat.unref?.();
+  wss.on('connection', (c: WsSocket, req: http.IncomingMessage) => {
+    const ip = (req.socket.remoteAddress || 'unknown').replace(/^::ffff:/, '');
+    let perIp = 0;
+    for (const v of clientIps.values()) if (v === ip) perIp++;
+    if (polyClients.size >= 200 || perIp >= 20) { try { c.close(1013, 'relay busy'); } catch { /* gone */ } return; }
+    (c as any).isAlive = true;
+    c.on('pong', () => { (c as any).isAlive = true; });
+    clientIps.set(c, ip);
+    c.on('close', () => clientIps.delete(c));
     const subs = new Set<string>();
     polyClients.set(c, subs);
     try { c.send(JSON.stringify({ event_type: 'relay_status', state: polyUpOpen ? 'live' : 'connecting' })); } catch { /* closing */ }
@@ -1858,10 +1921,10 @@ app.get('/api/jupiter/quote', async (req, res) => {
   for (const [k, v] of Object.entries(req.query)) if (typeof v === 'string' && v.length <= 200) qs.set(k, v);
   await passThrough(res, `https://lite-api.jup.ag/swap/v1/quote?${qs.toString()}`);
 });
-app.post('/api/jupiter/swap', async (req, res) => {
+app.post('/api/jupiter/swap', rateLimit(60), async (req, res) => {
   await passThrough(res, 'https://lite-api.jup.ag/swap/v1/swap', { method: 'POST', body: JSON.stringify(req.body || {}) });
 });
-app.get('/api/lifi/quote', async (req, res) => {
+app.get('/api/lifi/quote', rateLimit(60), async (req, res) => {
   const qs = new URLSearchParams();
   for (const [k, v] of Object.entries(req.query)) if (typeof v === 'string' && v.length <= 200) qs.set(k, v);
   await passThrough(res, `https://li.quest/v1/quote?${qs.toString()}`);
@@ -1895,6 +1958,12 @@ const BLOCKSCOUT_BY_CHAIN: Record<number, string> = {
   42161: 'https://arbitrum.blockscout.com', 10: 'https://explorer.optimism.io', 100: 'https://gnosis.blockscout.com',
   534352: 'https://scroll.blockscout.com', 42220: 'https://celo.blockscout.com', 25: 'https://cronos.blockscout.com',
   33139: 'https://apechain.blockscout.com', 34443: 'https://explorer.mode.network', 122: 'https://explorer.fuse.io',
+  // Audit 2026-11-21: zkSync Era (324) had NO working source — its
+  // official explorer API is unreachable from this server and
+  // Routescan answers "chain not supported", so /api/history/324
+  // 502'd permanently. zksync.blockscout.com verified live from this
+  // server (200 + Blockscout v2 shape).
+  324: 'https://zksync.blockscout.com',
 };
 // dir/amt/cp/st/sym ride along for the client's Activity row design —
 // all derived from fields the upstream item itself carries (value,
@@ -1915,13 +1984,17 @@ const histInflight = new Map<string, Promise<{ rows: HistRow[]; source: string }
 // Blockscout sits behind Cloudflare: a browser UA is what separates
 // the JSON API from the challenge page (verified live, see above).
 const BROWSER_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
-async function fetchHistory(chainId: number, address: string, symbol: string): Promise<{ rows: HistRow[]; source: string }> {
+async function fetchHistory(chainId: number, address: string, symbol: string, limit = 15): Promise<{ rows: HistRow[]; source: string }> {
   const me = address.toLowerCase();
   const label = (sent: boolean) => `${sent ? 'Sent' : 'Received'}${symbol ? ' ' + symbol : ''}`;
   const bs = BLOCKSCOUT_BY_CHAIN[chainId];
   if (bs) {
     try {
-      const r = await fetch(`${bs}/api/v2/addresses/${address}/transactions`, { headers: { Accept: 'application/json', 'User-Agent': BROWSER_UA }, signal: AbortSignal.timeout(8000) });
+      // Some Blockscout deployments (zkSync's) reject page_size as
+      // an unexpected field (422) — retry bare; the rows are sliced
+      // to the limit below either way.
+      let r = await fetch(`${bs}/api/v2/addresses/${address}/transactions?page_size=${limit}`, { headers: { Accept: 'application/json', 'User-Agent': BROWSER_UA }, signal: AbortSignal.timeout(8000) });
+      if (r.status === 422) r = await fetch(`${bs}/api/v2/addresses/${address}/transactions`, { headers: { Accept: 'application/json', 'User-Agent': BROWSER_UA }, signal: AbortSignal.timeout(8000) });
       if (r.ok) {
         const j: any = await r.json();
         if (Array.isArray(j?.items)) {
@@ -1929,30 +2002,45 @@ async function fetchHistory(chainId: number, address: string, symbol: string): P
           for (const t of j.items) {
             if (typeof t?.hash !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(t.hash)) continue;
             const from = String(t.from?.hash || ''); const to = String(t.to?.hash || '');
-            const sent = !(t.value && BigInt(t.value) > 0n && from.toLowerCase() !== me);
+            // Audit 2026-11-21: direction is who sent, full stop.
+            // The old value-based test labelled every zero-value
+            // INCOMING tx (token transfers, contract calls) as sent
+            // BY the user.
+            const sent = from.toLowerCase() === me;
             const cp = from.toLowerCase() === me ? to : from;
             rows.push({ hash: t.hash, label: label(sent), ts: t.timestamp ? new Date(t.timestamp).getTime() || 0 : 0, dir: sent ? 'out' : 'in', amt: t.value ? weiToDecimal(String(t.value)) : undefined, cp: /^0x[0-9a-fA-F]{40}$/.test(cp) ? cp : undefined, st: t.status === 'error' ? 'failed' : undefined, sym: symbol || undefined });
           }
-          return { rows: rows.slice(0, 15), source: 'blockscout' };
+          return { rows: rows.slice(0, limit), source: 'blockscout' };
         }
       }
     } catch { /* fall through to the fallback source */ }
   }
-  const qs = new URLSearchParams({ module: 'account', action: 'txlist', address, page: '1', offset: '15', sort: 'desc' });
+  const qs = new URLSearchParams({ module: 'account', action: 'txlist', address, page: '1', offset: String(limit), sort: 'desc' });
   const r = await fetch(`https://api.routescan.io/v2/network/mainnet/evm/${chainId}/etherscan/api?${qs.toString()}`, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(10000) });
   if (!r.ok) throw new Error('routescan ' + r.status);
   const j: any = await r.json();
+  // Audit 2026-11-21: Routescan answers HTTP 200 with
+  // {status:"0", message:"chain not supported", result:null} for
+  // chains it does not index (BNB 56, Fantom 250, …). That is a
+  // DEFINITIVE "no history source exists for this chain", not a
+  // transient failure — the old code threw, the endpoint 502'd
+  // forever, and the client showed "unavailable" instead of its
+  // honest empty state. Answer with an empty list and source "none".
+  // Other status:"0" payloads (rate limits etc.) still throw.
+  if (!Array.isArray(j?.result) && typeof j?.message === 'string' && /not supported/i.test(j.message)) {
+    return { rows: [], source: 'none' };
+  }
   const list = Array.isArray(j?.result) ? j.result : null;
   if (!list) throw new Error('routescan payload');
   const rows: HistRow[] = [];
   for (const t of list) {
     if (typeof t?.hash !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(t.hash)) continue;
     const from = String(t.from || ''); const to = String(t.to || '');
-    const sent = !(t.value && t.value !== '0' && from.toLowerCase() !== me);
+    const sent = from.toLowerCase() === me; // direction = who sent (see Blockscout branch)
     const cp = from.toLowerCase() === me ? to : from;
     rows.push({ hash: t.hash, label: label(sent), ts: Number(t.timeStamp || 0) * 1000, dir: sent ? 'out' : 'in', amt: t.value ? weiToDecimal(String(t.value)) : undefined, cp: /^0x[0-9a-fA-F]{40}$/.test(cp) ? cp : undefined, st: String(t.isError || '0') === '1' ? 'failed' : undefined, sym: symbol || undefined });
   }
-  return { rows: rows.slice(0, 15), source: 'routescan' };
+  return { rows: rows.slice(0, limit), source: 'routescan' };
 }
 app.get('/api/history/:chainId', rateLimit(120), async (req, res) => {
   const chainId = Number(req.params.chainId);
@@ -1960,13 +2048,16 @@ app.get('/api/history/:chainId', rateLimit(120), async (req, res) => {
   const symbolRaw = String(req.query.symbol || '');
   const symbol = /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,11}$/.test(symbolRaw) ? symbolRaw : '';
   if (!Number.isSafeInteger(chainId) || chainId <= 0 || !/^0x[0-9a-fA-F]{40}$/.test(address)) { res.status(400).json({ error: 'bad request' }); return; }
-  const key = `${chainId}:${address.toLowerCase()}`;
+  // Activity "show more" asks for a deeper page (audit 2026-11-21);
+  // the depth rides the cache key so depths never mix.
+  const histLimit = Math.min(100, Math.max(15, Number(req.query.limit) || 15));
+  const key = `${chainId}:${address.toLowerCase()}:${histLimit}`;
   const hit = histCache.get(key);
   if (hit && Date.now() - hit.at < 20000) { res.json({ ...hit.data, at: hit.at }); return; }
   try {
     let p = histInflight.get(key);
     if (!p) {
-      p = fetchHistory(chainId, address, symbol).then(data => { histCache.set(key, { at: Date.now(), data }); return data; }).finally(() => histInflight.delete(key));
+      p = fetchHistory(chainId, address, symbol, histLimit).then(data => { cacheSet(histCache, key, { at: Date.now(), data }, 300); return data; }).finally(() => histInflight.delete(key));
       histInflight.set(key, p);
     }
     const data = await p;
@@ -1984,7 +2075,10 @@ app.get('/api/health', (_req, res) => {
   let integrity: any = { status: 'unknown' };
   try {
     const j = JSON.parse(fs.readFileSync(path.join(ROOT, 'data', 'integrity-status.json'), 'utf8'));
-    if (j && (j.status === 'ok' || j.status === 'failed')) integrity = j;
+    // Audit 2026-11-21: never republish the checker's `detail` — on
+    // failure it names served files and can carry a raw fs error with
+    // an absolute server path. Status + timestamp + build suffice.
+    if (j && (j.status === 'ok' || j.status === 'failed')) integrity = { status: j.status, checkedAt: j.checkedAt ?? null, build: j.build ?? null };
   } catch { /* checker has not run yet */ }
   res.json({ ok: true, service: 'syn-wallet', build: BUILD_ID, tls: TLS, at: Date.now(), integrity });
 });

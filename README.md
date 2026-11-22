@@ -1,54 +1,169 @@
 # Syn Wallet
 
-Syn's first public live project: a **non-custodial, phone-first, multi-chain crypto wallet** on the web — create or import a wallet like Trust Wallet, for Solana, Ethereum, Polygon, BNB Chain, Arbitrum, Base and Bitcoin.
+**A non-custodial, phone-first, multi-chain crypto wallet that runs entirely in the browser — your keys never leave your device.**
 
-**Live:** http://79.108.164.56:8800 (redirects) · https://79.108.164.56:8801 (self-signed cert, SAN IP:79.108.164.56)
+![TypeScript](https://img.shields.io/badge/TypeScript-5.5-3178C6?logo=typescript&logoColor=white)
+![Node.js](https://img.shields.io/badge/Node.js-20+-339933?logo=node.js&logoColor=white)
+![Vite](https://img.shields.io/badge/Vite-5-646CFF?logo=vite&logoColor=white)
+![Express](https://img.shields.io/badge/Express-4-000000?logo=express&logoColor=white)
+![Platform](https://img.shields.io/badge/Platform-Web%20%2F%20PWA-silver)
 
-## Security model (non-negotiable)
+Syn Wallet is a full-featured web wallet for Solana, Bitcoin, and 20+ EVM networks. Create or import a wallet from a single recovery phrase, hold and send assets across every chain, swap tokens, stake SOL, collect NFTs, trade perpetuals and prediction markets, and connect to dApps with WalletConnect — all from one mobile-first interface, with no account, no sign-up, and no server ever touching your keys.
 
-- **Everything is saved locally — full stop.** ALL user data lives only on the user's device/browser: the encrypted vault (seed/keys), wallet metadata and preferences in local browser storage, sensitive material encrypted. The server stores **nothing** about any user: no database, no accounts, no sessions, no cloud backup, no server-side wallet files — it is a stateless static host. The price/RPC proxy is a pure pass-through with **no persistence and no logging** of wallet addresses, request bodies or transaction data; only public market data (prices/charts) is cached, in memory. No third-party analytics/trackers anywhere. Trade-off, stated in the app: if the user clears browser data or loses the device without their recovery phrase, the wallet cannot be recovered by Syn.
+---
 
-- **Non-custodial, client-side only.** Seed phrases and private keys are generated, derived and used for signing **entirely in your browser**. The server is a dumb static host + price/RPC proxy and **never receives, logs or stores any seed, private key, or password**.
-- **Vault:** the secret is encrypted at rest in the browser (localStorage) with **AES-GCM**; the key is derived from your wallet password via **PBKDF2 (WebCrypto, 600,000 iterations, random salt/IV)**. Auto-lock after 5 minutes of inactivity + manual Lock. Reveal-phrase requires password re-entry. Wipe removes the vault from the device.
-- **No analytics or tracking** on wallet screens.
+## Features
 
-## Features (v1)
+**Wallet core**
+- Create a wallet with a 12-word BIP39 recovery phrase (numbered backup screen + verify-by-selecting-words), or import a 12/24-word phrase or a single-chain private key
+- One seed derives every chain (BIP44 / SLIP-0010): Solana, all EVM networks, Bitcoin SegWit and Taproot, plus Litecoin, Tron, XRP, Cosmos, Sui, and Aptos
+- Multiple wallets and accounts in one encrypted vault, per-wallet network visibility controls, custom networks and custom tokens
 
-- **Create:** 12-word BIP39 mnemonic (@scure/bip39, WebCrypto RNG), numbered backup screen, verify-by-selecting-words, set password.
-- **Import:** 12/24-word BIP39 (checksum validated, clear error if invalid) or private key (Solana base58 / EVM hex) as a single-chain imported account.
-- **Multi-chain from one seed, BIP44:** Solana `m/44'/501'/0'/0'` (SLIP-0010 ed25519), EVM `m/44'/60'/0'/0/0`, Bitcoin SegWit `m/84'/0'/0'/0/0` (bc1q). Derivation is verified against known test vectors in `tests/`.
-- **Home:** total USD balance + per-asset live balances (Solana mainnet-beta, public EVM RPCs, Blockstream for BTC) and live USD prices via CoinGecko (proxied/cached server-side 60s). Honest unavailable states — never a faked 0 or price.
-- **Live Ticker Chart** (asset detail + home hero): real CoinGecko `market_chart` history via the server proxy, 24H/7D/1M ranges, live polling every 25s appending the real current price, "now" marker with pulse + LIVE indicator, gridlines with right-gutter price labels and a time axis. No fake data — if live data is unavailable the last real chart is shown without animation.
-- **Receive:** per-chain address + QR + copy. **Send:** native sends on Solana and all EVM chains (local signing, confirm screen, tx hash + explorer link). Bitcoin and Litecoin also send natively via the shared UTXO stack (coin selection, local signing, broadcast with txid verification).
-- **Activity:** recent transactions per chain via public APIs/RPC (Solana RPC, Blockstream, Blockscout) with explorer links; honest empty states.
-- **PWA:** installable, manifest + icons from the Syn chrome "S" logo.
+**Portfolio**
+- Live total balance and per-asset balances with real USD prices; honest "unavailable" states — a price or balance is never faked
+- Live ticker charts (24H / 7D / 1M) with streaming price updates, an asset detail view, and multi-currency display with live FX rates
+- Activity history per network and across all networks, merged with locally recorded sends, with a transaction detail sheet and depth paging
 
-## Design
+**Send & receive**
+- Native sends on Solana, every EVM chain, and the UTXO family (BTC / LTC) with coin selection, fee estimation, and a review screen that always accounts for the network fee
+- Receive with per-chain addresses and QR codes; address book with counterparty memory
 
-Syn design language: dark charcoal (#0a0c10), chrome/silver accent sampled from the Syn logo, green/red only as data colours, compact quiet text, native-iOS feel (large titles, grouped inset cards, frosted bottom tab bar), Remix Icons for every icon, never emojis. The app-wide card/row system adapts the UImaxxing auth-card pattern (lit-stroke rounded cards, 10px muted labels over 13px values, circular chrome-gradient arrow buttons, "OR" hairline dividers, circular arrow chips), the account-settings pattern for Settings (16px section headings, hairline rows, ghost pill buttons, mono ID chips), the orb-button pair for Receive/Send (chrome tilted-gradient orb + steel glow on the primary side), and the wide pill CTA shape (chrome/silver gradient, black label) for "Create wallet" and Send confirmation. All re-implemented natively in vanilla TS/CSS — no React/shadcn/Tailwind. There is deliberately **no email/social login**: a non-custodial wallet has no accounts.
+**Swap**
+- In-wallet swaps via Jupiter (Solana) and LI.FI (EVM and cross-chain), with live quotes, price-impact display, and locally signed transactions
 
-## Run
+**Invest**
+- **Crypto:** trending DEX pools per network (GeckoTerminal) alongside your own holdings
+- **Perpetuals:** Hyperliquid markets (crypto, stocks, commodities, pre-IPO) with an in-wallet trading key that can trade but never withdraw, live charts, and position management
+- **Prediction markets:** Polymarket browsing with live streamed prices, Up-or-Down short-window markets with a real-time Chainlink price-to-beat ticker, positions, and order placement signed on-device
+- **bStocks:** tokenized U.S. stocks and ETFs on BNB Chain with live DEX prices
+- **Stake:** native Solana staking with validator discovery and identities
 
-```bash
-npm install
-npm test        # derivation vectors + vault round-trip
-npm run build   # vite client -> public/, tsc server -> dist/
-npm start       # HTTPS 8801 + HTTP 8800 redirect (self-signed cert auto-generated in data/tls)
+**Collectibles**
+- NFT gallery across chains with collection views and on-device metadata rendering
+
+**dApps**
+- WalletConnect (Reown) pairing and request review — session proposals and signing requests queue in order and are approved or rejected on-device
+- Built-in Discover directory of dApps by category
+
+---
+
+## Screenshots
+
+Real captures of the running app live in the [`proof/`](proof/) directory:
+
+| File | Screen |
+| --- | --- |
+| `proof/01-onboarding.png` | Onboarding |
+| `proof/02-backup-blurred.png` | Recovery-phrase backup (blurred) |
+| `proof/03-set-password.png` | Set password |
+| `proof/04-home-orb-hero.png` | Home |
+| `proof/05-asset-ticker.png` | Asset detail with live ticker chart |
+| `proof/06-settings.png` | Settings |
+| `proof/07-unlock.png` | Unlock |
+
+---
+
+## Architecture
+
+Syn Wallet is deliberately split into a **client that holds everything** and a **server that holds nothing**.
+
+```
+Browser (all user data, all signing)            Server (stateless)
+┌──────────────────────────────────┐            ┌─────────────────────────────┐
+│ Encrypted vault (AES-256-GCM)    │  HTTPS     │ Static host for the client  │
+│ Key derivation + tx signing      │ ─────────► │ Public-data proxies only:   │
+│ Vanilla TypeScript UI (Vite)     │            │ prices, RPC pools, market   │
+│ WalletConnect / swap / trade     │            │ data, history — pass-through│
+│ logic, all local                 │            │ with in-memory caching      │
+└──────────────────────────────────┘            └─────────────────────────────┘
 ```
 
-Deploy (sober77): rsync the repo (excluding node_modules/dist/data) to `/root/syn-wallet`, `npm install && npm run build`, install `syn-wallet.service` to systemd and enable it.
+- The **client** (`client/`) is a dependency-light vanilla TypeScript app built with Vite. It generates and stores keys, derives addresses, builds and signs every transaction, and talks to swap/trading venues with the user's own credentials.
+- The **server** (`src/server.ts`, Express) exists because browsers cannot reliably reach every upstream (CORS, rate limits, bot walls). It serves the client and proxies **public market data only** — prices, charts, RPC calls, order books, history — with bounded in-memory caches. It has no database, no accounts, no sessions, and never receives, logs, or stores a seed phrase, private key, or password.
+- A small set of **build-time integrity tools** (`scripts/`) stamps each build with an ID and a release manifest, and verifies the served files against it.
 
-## Known v1 limitations
+---
 
-- BTC/LTC sends ride public esplora APIs (Blockstream/mempool.space, litecoinspace) — a first real-funds send on each UTXO chain should be a tiny test amount.
-- EVM activity depends on Blockscout public APIs; Solana/BTC activity on public RPC/Blockstream — any of them can rate-limit, in which case the UI shows an honest unavailable/empty state.
-- HTTPS uses a self-signed certificate (same pattern as the other Syn apps) — browsers show a warning until it is trusted.
-- Only native assets are shown in v1 (no SPL/ERC-20 token list yet).
+## Tech stack
 
-## Threat model & honest limits
+| Layer | Technology |
+| --- | --- |
+| Language | TypeScript (client + server) |
+| Client build | Vite |
+| Server | Node.js, Express, `ws` (WebSocket relay) |
+| Key derivation | `@scure/bip39`, `@scure/bip32`, `@scure/btc-signer`, `@scure/base`, `@noble/curves`, `@noble/hashes` |
+| Chains | `@solana/web3.js`, `@solana/spl-token`, `ethers` |
+| dApp protocol | WalletConnect / Reown (`@walletconnect/sign-client`) |
+| Swaps | Jupiter (Solana), LI.FI (EVM / cross-chain) |
+| Markets | Polymarket (Gamma, CLOB, Data API, Relayer), Hyperliquid API |
+| Prices & data | CoinGecko, GeckoTerminal, DexScreener, Blockscout, Routescan, Frankfurter (FX) |
+| Typography | Allo (UI), DotGothic16 (dot-matrix amounts) |
+| Icons | Remix Icon (self-hosted) |
 
-Implemented: CSPRNG entropy via @scure/bip39 (12 words / 128-bit, optional 24 words / 256-bit); AES-256-GCM vault, PBKDF2-HMAC-SHA256 at 600,000 iterations (OWASP), random 32-byte salt + unique IV per encryption, versioned vault format; decrypted material in memory only, wiped on lock; unlock throttling with growing delays; configurable auto-lock (1/5/15 min); app always starts locked; backup words blurred until tap-to-reveal and re-hidden when the tab loses visibility; word-by-word seed import with BIP39 autocomplete; seed clipboard copy auto-clears after ~20s; reveal-phrase is password-gated every time and auto-hides after 30s; clear-signing send confirmations (network, validated recipient, amount, estimated fee, balance after) with EIP-55/base58 validation hard-blocking bad addresses and an address-poisoning similarity warning; no dApp/message signing surface in v1; strict CSP with everything self-hosted (no CDNs), X-Frame-Options DENY / frame protection, Referrer-Policy no-referrer, Permissions-Policy locked down, HSTS, HTTPS-only (HTTP only redirects, plus an in-app HTTP warning).
+---
 
-Not in v1, honestly: device biometrics/WebAuthn unlock (left out — it cannot wrap the vault key without weakening the password vault); hardware-wallet support.
+## Security model
 
-Out of scope for any web wallet (MetaMask states the same): a compromised device, browser or clipboard at the OS level, and physical coercion. Syn can never recover a wallet — only the recovery phrase can.
+- **Local-only, non-custodial.** All user data lives on the user's device: the encrypted vault, wallet metadata, and preferences in browser storage. The server stores nothing about any user — there is no cloud backup and no account to recover from. If a user loses their device and their recovery phrase, the wallet cannot be restored by anyone.
+- **Vault encryption.** Secrets are encrypted at rest with **AES-256-GCM**; the encryption key is derived from the wallet password with **PBKDF2, 600,000 iterations** (WebCrypto, random salt and IV). Minimum password length is enforced; the vault auto-locks after inactivity, and revealing the recovery phrase requires password re-entry.
+- **Signing stays on-device.** Every transaction — sends, swaps, Polymarket orders, Hyperliquid actions — is built and signed in the browser. Trading keys for Hyperliquid are generated on-device, stored only in the encrypted vault, and are trade-only (they cannot withdraw).
+- **No tracking.** No analytics, telemetry, or error-reporting SDKs anywhere in the app; WalletConnect telemetry is explicitly disabled.
+- **Constrained server surface.** Proxies are allowlisted and rate-limited; the Polymarket builder-signing helper is pinned to the single relayer operation the app performs; responses and caches are size-bounded.
+
+---
+
+## Getting started
+
+Requirements: Node.js 20+ and npm.
+
+```bash
+npm ci          # install dependencies
+npm run build   # build the client (Vite) and the server (tsc)
+npm start       # serve the app
+npm test        # run the full test suite
+```
+
+Optional operator keys can be supplied through environment variables for enhanced data sources (for example a Trust Wallet API key or RPC provider keys). The app runs without them on public endpoints; no key is ever sent to the browser.
+
+---
+
+## Project structure
+
+```
+client/            Browser app (vanilla TypeScript + CSS)
+  main.ts          UI, screens, and flows
+  style.css        Design system (dark charcoal, chrome/silver)
+  lib/             Chain, wallet, market, and protocol modules
+src/               Server
+  server.ts        Express host + public-data proxies + WS relay
+  tw.ts            Trust Wallet API client (server-side)
+scripts/           Build stamping, integrity check, catalog tools
+tests/             Derivation, vault, protocol, and audit test suites
+proof/             Screenshots of the running app
+```
+
+---
+
+## Credits
+
+Syn Wallet stands on excellent open-source work and public APIs:
+
+- **Trust Wallet** — the [Trust Wallet API](https://portal.trustwallet.com) (`tws.trustwallet.com`) is integrated server-side as an optional data source for address validation, asset status, and tickers.
+- **WalletConnect / Reown** — dApp pairing and session protocol (`@walletconnect/sign-client`, `@walletconnect/utils`).
+- **Jupiter** — Solana swap aggregation. **LI.FI** — EVM and cross-chain swap routing.
+- **@scure** (`bip39`, `bip32`, `btc-signer`, `base`) and **@noble** (`curves`, `hashes`) — audited key-derivation and cryptography primitives.
+- **Solana** (`@solana/web3.js`, `@solana/spl-token`) and **ethers** — chain clients.
+- **Polymarket** — Gamma, CLOB, and Data APIs plus the Relayer for prediction markets. **Hyperliquid** — perpetuals API.
+- **CoinGecko**, **GeckoTerminal**, **DexScreener**, **Blockscout**, **Routescan**, **Frankfurter**, and **validators.app** — public price, market, history, FX, and validator data.
+- **Vite**, **Express**, **TypeScript**, and **ws** — build and runtime foundations.
+- **Allo** typeface by Josh Puckett (allo.joshpuckett.me) — the app's UI type system. **DotGothic16** via Fontsource — dot-matrix display numerals.
+- **Remix Icon** — every icon in the interface, self-hosted.
+- **uimaxx.ing** — several Prediction-market card designs (mini market card, match card, event card, market detail) were adapted from its registry patterns and re-implemented natively.
+
+The interface is hand-built in vanilla TypeScript and CSS — no UI framework — following a native-iOS design language: large-title navigation, grouped inset cards, and a frosted tab bar.
+
+---
+
+## License
+
+No license file is included at this time; the source is published for review. All rights reserved by the author unless a license is added later.
