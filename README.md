@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://r2.fivemanage.com/WD0UYkJxI50yH1OBccdt2/gitbanner.png" alt="Syn Wallet" width="100%">
+<img src="https://r2.fivemanage.com/WD0UYkJxI50yH1OBccdt2/Logo-Transparent.png" alt="Syn Wallet" width="120">
 
 # Syn Wallet
 
@@ -33,6 +33,8 @@ Syn Wallet is a full-featured web wallet for Solana, Bitcoin, and 20+ EVM networ
 
 > [!IMPORTANT]
 > **Local-only by design.** There is no account, no cloud backup, and no recovery service. Your encrypted vault lives only in your browser — if you lose your device and your recovery phrase, nobody can restore your wallet. That is the point.
+
+<img src="https://r2.fivemanage.com/WD0UYkJxI50yH1OBccdt2/gitbanner.png" alt="Syn Wallet" width="100%">
 
 ---
 
