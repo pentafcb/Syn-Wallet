@@ -3156,9 +3156,9 @@ function bindReceipt(hash: string, explorerTx: string, done: (el: HTMLElement) =
 // polygon.blockscout.com answers browser fetches with a Cloudflare
 // challenge). Throws when every source failed, so callers can render
 // the honest UNAVAILABLE state (never a fake empty).
-async function fetchChainActivity(c: Chain, addr: string): Promise<ActivityRow[]> {
-  if (c.kind === 'solana' || c.kind === 'solana-tw') { const conn = new Connection(solanaRpcUrl()); const sigs = await conn.getSignaturesForAddress(new PublicKey(addr), { limit: 15 }); return sigs.map(s => ({ hash: s.signature, label: s.err ? 'Failed transaction' : 'Transaction', sub: s.blockTime ? new Date(s.blockTime * 1000).toLocaleString() : '', ts: s.blockTime ? s.blockTime * 1000 : 0, dir: 'other' as ActDir, sym: 'SOL', st: s.err ? 'failed' as const : undefined })); }
-  if (c.kind === 'bitcoin') { const r = await fetch(`/api/utxo/${c.id}/txs/${addr}`); const j = await r.json(); return (Array.isArray(j) ? j : []).slice(0, 15).map((t: any) => {
+async function fetchChainActivity(c: Chain, addr: string, limit = 15): Promise<ActivityRow[]> {
+  if (c.kind === 'solana' || c.kind === 'solana-tw') { const conn = new Connection(solanaRpcUrl()); const sigs = await conn.getSignaturesForAddress(new PublicKey(addr), { limit }); return sigs.map(s => ({ hash: s.signature, label: s.err ? 'Failed transaction' : 'Transaction', sub: s.blockTime ? new Date(s.blockTime * 1000).toLocaleString() : '', ts: s.blockTime ? s.blockTime * 1000 : 0, dir: 'other' as ActDir, sym: 'SOL', st: s.err ? 'failed' as const : undefined })); }
+  if (c.kind === 'bitcoin') { const r = await fetch(`/api/utxo/${c.id}/txs/${addr}`); const j = await r.json(); return (Array.isArray(j) ? j : []).slice(0, limit).map((t: any) => {
     // Direction/amount/counterparty derive from the tx's own vin/vout —
     // the passthrough returns the full esplora transaction.
     const vins: any[] = Array.isArray(t.vin) ? t.vin : []; const vouts: any[] = Array.isArray(t.vout) ? t.vout : [];
@@ -3168,7 +3168,7 @@ async function fetchChainActivity(c: Chain, addr: string): Promise<ActivityRow[]
     else if (vouts.some(o => mine(o.scriptpubkey_address))) { dir = 'in'; for (const o of vouts) if (mine(o.scriptpubkey_address)) sats += Number(o.value) || 0; const f = vins.find(v => v.prevout?.scriptpubkey_address && !mine(v.prevout.scriptpubkey_address)); cp = f?.prevout?.scriptpubkey_address || ''; }
     return { hash: t.txid, label: dir === 'out' ? `Sent ${c.symbol}` : dir === 'in' ? `Received ${c.symbol}` : `${c.name} transaction`, sub: t.status?.block_time ? new Date(t.status.block_time * 1000).toLocaleString() : 'Unconfirmed', ts: t.status?.block_time ? t.status.block_time * 1000 : 0, dir, sym: c.symbol, amt: dir && sats > 0 ? sats / 1e8 : undefined, cp: cp || undefined, st: t.status && t.status.confirmed === false ? 'pending' as const : undefined };
   }); }
-  if (c.kind === 'tron') { const r = await fetch(`https://api.trongrid.io/v1/accounts/${addr}/transactions?limit=15&only_confirmed=true`); const j = await r.json(); const myHex = tronToHex(addr).toLowerCase(); return (j.data || []).map((t: any) => {
+  if (c.kind === 'tron') { const r = await fetch(`https://api.trongrid.io/v1/accounts/${addr}/transactions?limit=${limit}&only_confirmed=true`); const j = await r.json(); const myHex = tronToHex(addr).toLowerCase(); return (j.data || []).map((t: any) => {
     const base: ActivityRow = { hash: t.txID, label: 'TRX transfer', sub: t.block_timestamp ? new Date(t.block_timestamp).toLocaleString() : '', ts: t.block_timestamp || 0, dir: 'other', sym: 'TRX', st: t.ret?.[0]?.contractRet && t.ret[0].contractRet !== 'SUCCESS' ? 'failed' : undefined };
     const k = t.raw_data?.contract?.[0];
     if (k?.type === 'TransferContract') {
@@ -3179,7 +3179,7 @@ async function fetchChainActivity(c: Chain, addr: string): Promise<ActivityRow[]
     }
     return base;
   }); }
-  if (c.kind === 'xrp') { const r = await fetch('https://xrplcluster.com/', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ method: 'account_tx', params: [{ account: addr, limit: 15, ledger_index_min: -1, ledger_index_max: -1 }] }) }); const j = await r.json(); return (j.result?.transactions || []).map((x: any) => {
+  if (c.kind === 'xrp') { const r = await fetch('https://xrplcluster.com/', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ method: 'account_tx', params: [{ account: addr, limit, ledger_index_min: -1, ledger_index_max: -1 }] }) }); const j = await r.json(); return (j.result?.transactions || []).map((x: any) => {
     const base: ActivityRow = { hash: x.tx.hash, label: 'XRP transaction', sub: x.tx.date ? new Date((x.tx.date + 946684800) * 1000).toLocaleString() : '', ts: x.tx.date ? (x.tx.date + 946684800) * 1000 : 0, dir: 'other', sym: 'XRP', st: x.meta?.TransactionResult && x.meta.TransactionResult !== 'tesSUCCESS' ? 'failed' : undefined };
     if (x.tx.TransactionType === 'Payment') {
       const raw = x.meta?.delivered_amount ?? x.tx.Amount;
@@ -3191,13 +3191,13 @@ async function fetchChainActivity(c: Chain, addr: string): Promise<ActivityRow[]
     }
     return base;
   }); }
-  if (c.kind === 'sui') { const r = await fetch('https://graphql.mainnet.sui.io/graphql', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query: `query { transactions(first: 15, filter: { affectedAddress: "${addr}" }) { nodes { digest effects { timestamp } } } }` }) }); const j = await r.json(); return (j?.data?.transactions?.nodes || []).map((t: any) => ({ hash: t.digest, label: 'Sui transaction', sub: t.effects?.timestamp ? new Date(t.effects.timestamp).toLocaleString() : '', ts: t.effects?.timestamp ? new Date(t.effects.timestamp).getTime() : 0, dir: 'other' as ActDir, sym: 'SUI' })); }
-  if (c.kind === 'aptos') { const r = await fetch(`https://api.mainnet.aptoslabs.com/v1/accounts/${encodeURIComponent(addr)}/transactions?limit=15`); const j = await r.json(); return (Array.isArray(j) ? j : []).map((t: any) => ({ hash: t.hash, label: 'Aptos transaction', sub: t.timestamp ? new Date(Math.floor(Number(t.timestamp) / 1000)).toLocaleString() : '', ts: t.timestamp ? Math.floor(Number(t.timestamp) / 1000) : 0, dir: 'other' as ActDir, sym: 'APT', st: t.success === false ? 'failed' as const : undefined })); }
+  if (c.kind === 'sui') { const r = await fetch('https://graphql.mainnet.sui.io/graphql', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query: `query { transactions(first: ${limit}, filter: { affectedAddress: "${addr}" }) { nodes { digest effects { timestamp } } } }` }) }); const j = await r.json(); return (j?.data?.transactions?.nodes || []).map((t: any) => ({ hash: t.digest, label: 'Sui transaction', sub: t.effects?.timestamp ? new Date(t.effects.timestamp).toLocaleString() : '', ts: t.effects?.timestamp ? new Date(t.effects.timestamp).getTime() : 0, dir: 'other' as ActDir, sym: 'SUI' })); }
+  if (c.kind === 'aptos') { const r = await fetch(`https://api.mainnet.aptoslabs.com/v1/accounts/${encodeURIComponent(addr)}/transactions?limit=${limit}`); const j = await r.json(); return (Array.isArray(j) ? j : []).map((t: any) => ({ hash: t.hash, label: 'Aptos transaction', sub: t.timestamp ? new Date(Math.floor(Number(t.timestamp) / 1000)).toLocaleString() : '', ts: t.timestamp ? Math.floor(Number(t.timestamp) / 1000) : 0, dir: 'other' as ActDir, sym: 'APT', st: t.success === false ? 'failed' as const : undefined })); }
   if (c.kind === 'cosmos') { throw new Error('cosmos-activity-unavailable'); }
   if (c.kind === 'evm') {
     if (c.blockscout) {
       try {
-        const r = await fetch(`${c.blockscout}/api/v2/addresses/${addr}/transactions?page_size=15`);
+        const r = await fetch(`${c.blockscout}/api/v2/addresses/${addr}/transactions?page_size=${limit}`);
         if (!r.ok) throw new Error('blockscout ' + r.status);
         const j = await r.json();
         if (!Array.isArray(j.items)) throw new Error('blockscout payload');
@@ -3223,7 +3223,7 @@ async function fetchChainActivity(c: Chain, addr: string): Promise<ActivityRow[]
       } catch { /* primary source failed — the fallback below answers instead */ }
     }
     if (c.evmId != null) {
-      const r = await fetch(`/api/history/${c.evmId}?address=${encodeURIComponent(addr)}&symbol=${encodeURIComponent(c.symbol)}`);
+      const r = await fetch(`/api/history/${c.evmId}?address=${encodeURIComponent(addr)}&symbol=${encodeURIComponent(c.symbol)}&limit=${limit}`);
       if (!r.ok) throw new Error('history-unavailable');
       const j = await r.json();
       if (!Array.isArray(j.rows)) throw new Error('history-unavailable');
@@ -3318,6 +3318,10 @@ function showActivity() {
   setView(`<main><div class="ltWrap"><div class="largeTitle">Activity</div></div><div class="chipRail" id="actRail"><button class="netChip on" data-c="all">${iconHTML('', 'ALL', 'All networks', { sm: true })}<span>All networks</span></button>${visibleChains().map(x => `<button class="netChip" data-c="${x.id}">${iconHTML(chainIconUrl(x), x.symbol, x.name, { sm: true })}<span>${esc(x.name)}</span></button>`).join('')}</div><div id="actList" style="padding:2px 16px 0">${waveLoadBlockHTML()}</div></main>`);
   let actChain = 'all';
   let paintedChain = '';
+  // Audit fix: Activity was hard-capped (15 per source, 20/40 after
+  // merge) with no way to reach older transactions. Depth now grows
+  // via the "Show more" button (15 → 50 → 100 per source).
+  let actDepth = 15;
   // Row anatomy (fixed height, so a status flip can never shift layout):
   // chrome-ring direction medallion · asset icon with the network mark
   // as a corner badge · two-line text (action label, then counterparty
@@ -3361,6 +3365,14 @@ function showActivity() {
       if (rw) openTxDetail(rw, chain || CHAINS.find(x => x.id === rw.chainId));
     });
   };
+  const paintMoreBtn = (el: HTMLElement, shown: number, cap: number) => {
+    if (actDepth >= 100 || shown < cap - 5) return;
+    const wrap = document.createElement('div');
+    wrap.style.padding = '14px 16px 6px';
+    wrap.innerHTML = '<button class="btnGhost" type="button">Show more activity</button>';
+    (wrap.querySelector('button') as HTMLButtonElement).onclick = () => { actDepth = Math.min(100, actDepth + 35); void load(actChain); };
+    el.appendChild(wrap);
+  };
   const paintRows = (c: Chain, rows: ActivityRow[]) => {
     const el = $('#actList'); if (!el || actChain !== c.id) return;
     paintedChain = c.id;
@@ -3370,6 +3382,7 @@ function showActivity() {
     }
     el.innerHTML = groupHTML(rows, c);
     bindRows(el, rows, c);
+    paintMoreBtn(el, rows.length, actDepth + 10);
   };
   // Local records + chain rows merged by hash, newest first — a send
   // appears the moment it broadcasts and is never duplicated when the
@@ -3381,7 +3394,7 @@ function showActivity() {
     const localByHash = new Map(locals.map(r => [r.hash.toLowerCase(), r]));
     const merged = fetched.map(f => { const l = localByHash.get(f.hash.toLowerCase()); return l ? { ...f, label: l.label, dir: l.dir ?? f.dir, sym: l.sym ?? f.sym, amt: l.amt ?? f.amt, img: l.img ?? f.img, cgid: l.cgid ?? f.cgid, cp: l.cp ?? f.cp } : f; });
     const seen = new Set(fetched.map(r => r.hash.toLowerCase()));
-    return [...merged, ...locals.filter(r => !seen.has(r.hash.toLowerCase()))].sort((a, b) => (b.ts || 0) - (a.ts || 0)).slice(0, 20);
+    return [...merged, ...locals.filter(r => !seen.has(r.hash.toLowerCase()))].sort((a, b) => (b.ts || 0) - (a.ts || 0)).slice(0, actDepth + 10);
   };
   const tagChain = (rows: ActivityRow[], chainId: string): ActivityRow[] => rows.map(r => ({ ...r, chainId }));
   const mergeAll = (perChain: ActivityRow[][]): ActivityRow[] => {
@@ -3390,7 +3403,7 @@ function showActivity() {
       const k = (r.chainId || '') + ':' + r.hash.toLowerCase();
       if (seen.has(k)) continue; seen.add(k); out.push(r);
     }
-    return out.sort((a, b) => (b.ts || 0) - (a.ts || 0)).slice(0, 40);
+    return out.sort((a, b) => (b.ts || 0) - (a.ts || 0)).slice(0, Math.min(actDepth * 4, 200));
   };
   const paintAll = (rows: ActivityRow[], failedNames: string[]) => {
     const el = $('#actList'); if (!el || actChain !== 'all') return;
@@ -3405,6 +3418,7 @@ function showActivity() {
     // of the list is complete and stays put.
     el.innerHTML = groupHTML(rows) + (failedNames.length ? `<p class="emptySub" style="text-align:center;padding:12px 8px 4px">Couldn't reach ${esc(failedNames.join(', '))} — showing everything else.</p>` : '');
     bindRows(el, rows);
+    paintMoreBtn(el, rows.length, Math.min(actDepth * 4, 200));
   };
   const loadAll = async () => {
     actChain = 'all';
@@ -3418,7 +3432,7 @@ function showActivity() {
     await Promise.all(chains.map(async c => {
       const addr = addressFor(c); if (!addr) return;
       try {
-        const rows = await fetchChainActivity(c, addr);
+        const rows = await fetchChainActivity(c, addr, actDepth);
         pruneLocalTxs(c.id, rows);
         activityCache.set(c.id, rows);
       } catch {
@@ -3448,7 +3462,7 @@ function showActivity() {
     if (cached || locals.length) paintRows(c, mergeRows(locals, cached || []));
     else { paintedChain = ''; el.innerHTML = waveLoadBlockHTML(); }
     try {
-      const rows = await fetchChainActivity(c, addr);
+      const rows = await fetchChainActivity(c, addr, actDepth);
       pruneLocalTxs(chainId, rows);
       activityCache.set(chainId, rows); saveDataCache();
       paintRows(c, mergeRows(localTxRows(chainId), rows));
