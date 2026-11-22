@@ -1374,6 +1374,7 @@ function setTabActive() { const t = currentTab(); document.querySelectorAll('#ta
 function mountShell() {
   if (shellMounted) return; shellMounted = true;
   app().innerHTML = `<div id="view"></div><nav class="tabbar" id="tabbar">
+    <div class="railBrand" aria-hidden="true"><img src="/assets/logo-sm.png" alt=""><span class="railWord">Syn Wallet</span></div>
     <span class="tabTrack" id="tabTrack"></span>
     <span class="tabGlider" id="tabGlider"><span class="tabGliderIn" id="tabGliderIn"><span class="tabSheen"></span></span></span>
     <button data-tab="wallet">${TAB_IC_WALLET}Wallet</button>
@@ -1413,6 +1414,9 @@ function renderRoute(e: RouteEntry, restore = true) {
   if (e.route !== 'invest') polyListCleanup();
   const prevRoute = currentRoute;
   currentRoute = e.route; currentChain = e.chainId || ''; setTabActive();
+  // Desktop layout hook: style.css keys per-screen desktop grids off
+  // this attribute (≥1024px only; inert on phone).
+  const vwEl = document.getElementById('view'); if (vwEl) vwEl.dataset.route = e.route;
   quietViewIn = prevRoute === e.route && prevRoute !== '';
   if (e.route === 'wallet') showHome();
   else if (e.route === 'activity') showActivity();

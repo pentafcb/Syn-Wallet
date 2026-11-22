@@ -1583,3 +1583,131 @@ input,textarea,select{font-size:16px!important}
 .lRow:not(:first-child)::before{content:"";position:absolute;top:0;left:68px;right:0;height:1px;background:var(--line2)}
 .aMain{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
 .popAdded{flex:none;display:inline-flex;align-items:center;gap:4px;font-size:13px;color:var(--muted)}
+
+/* ================================================================
+   Desktop layout (≥1024px) — layout only: no phone rule above this
+   block changes, and nothing here applies below the breakpoint.
+   The phone shell is a 480px column with a floating bottom pill;
+   on desktop the same DOM becomes a left navigation rail + a wide
+   content measure, sheets become centred modals, and the grids
+   that stack on phone open into columns. Per-screen grids key off
+   #view[data-route] (set in renderRoute) and stand down while a
+   navigation transition is staging (.navStaging).
+   ================================================================ */
+.railBrand{display:none}
+@media (min-width:1024px){
+  /* Frame: body un-caps; #view carries the rail offset (236 rail +
+     48 gap) and a centred max measure. */
+  body{max-width:none}
+  #view{max-width:1560px;margin:0 auto;padding:26px 44px 96px 284px}
+  /* Flow screens (onboarding / unlock / add-wallet) keep a quiet
+     centred column; their fixed artwork layers still span the
+     viewport. */
+  .shellMain{max-width:520px;margin:0 auto}
+  .ambient{max-width:none}
+
+  /* Tab bar -> left rail. The glider/track are phone-pill chrome;
+     hidden here, the active state is a filled chrome row instead. */
+  .tabbar{left:0;top:0;bottom:0;transform:none;width:236px;max-width:none;flex-direction:column;align-items:stretch;justify-content:flex-start;gap:4px;padding:26px 14px 18px;border-radius:0;border:none;border-right:1px solid var(--line);background:linear-gradient(180deg,rgba(255,255,255,.045),rgba(255,255,255,.012) 40%),rgba(12,14,18,.94);box-shadow:none;animation:none}
+  .tabbar::before{display:none}
+  .tabTrack,.tabGlider{display:none}
+  .railBrand{display:flex;align-items:center;gap:11px;padding:2px 10px 22px}
+  .railBrand img{width:34px;height:34px;object-fit:contain}
+  .railWord{font-size:16px;font-weight:700;letter-spacing:-.01em;color:var(--hi)}
+  .tabbar button{flex:none;flex-direction:row;align-items:center;justify-content:flex-start;gap:12px;padding:11px 12px;border-radius:13px;font-size:13.5px;animation:none}
+  .tabbar button .ic{width:24px;height:24px}
+  .tabbar button .ic svg{width:21px;height:21px}
+  .tabbar button:active{transform:none}
+  .tabbar button.on{background:linear-gradient(135deg,#f7fafc 0%,#d9e0e8 34%,#aebfd2 68%,#ecf1f6 100%);box-shadow:0 8px 22px rgba(199,208,218,.22),inset 0 1px 0 rgba(255,255,255,.9)}
+  .tabbar button .dot{top:50%;right:12px;transform:translateY(-50%)}
+
+  /* Sheets -> centred modals. */
+  .sheet{left:50%;right:auto;top:50%;bottom:auto;width:min(560px,calc(100vw - 64px));max-width:none;margin:0;border:1px solid var(--line);border-radius:22px;max-height:84dvh;transform:translate(-50%,-48%);opacity:0;pointer-events:none;box-shadow:0 30px 80px rgba(0,0,0,.6);transition:transform .32s cubic-bezier(.32,.72,.24,1),opacity .25s ease}
+  .sheetWrap.open .sheet{transform:translate(-50%,-50%);opacity:1;pointer-events:auto}
+  .sheetGrabZone{display:none}
+
+  /* The sticky CTA no longer has to clear a floating bottom bar. */
+  .stickyCta{bottom:24px}
+
+  /* Home: full-width balance hero, the six actions as one strip,
+     then Tokens and Explore side by side in the same row (a shared
+     row, so neither list can push the other down). */
+  .homeMain{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:28px;align-items:start}
+  .homeMain .ptr{display:none}
+  .homeMain .ltWrap{grid-column:1/-1}
+  .homeMain .heroCard{grid-column:1/-1;grid-row:2;margin:10px 0 14px}
+  .homeMain .actionGrid{grid-column:1/-1;grid-row:3;margin:8px 0 26px;grid-template-columns:repeat(6,1fr)}
+  .homeMain .homeSec{grid-row:4;margin-bottom:24px}
+  .homeMain .homeSec:nth-of-type(2){grid-column:1}
+  .homeMain .homeSec:nth-of-type(3){grid-column:2}
+  .homeMain .iosList{margin-left:0;margin-right:0}
+  .homeMain .secHead{top:0;padding-left:2px;padding-right:2px}
+
+  /* Settings: groups pair into two columns under a full-width
+     wallet header. (Screens render inside a <main> in #view.) */
+  #view[data-route="settings"]:not(.navStaging) main{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:28px;align-items:start}
+  #view[data-route="settings"] main .ltWrap{grid-column:1/-1}
+  #view[data-route="settings"] main .wHead{grid-column:1/-1;width:auto;margin:2px 0 26px}
+  #view[data-route="settings"] main .gGroup{margin:0 0 26px}
+
+  /* Asset / token detail: identity + chart + actions left, stat
+     groups right (dense flow backfills the right column). */
+  #view[data-route="asset"]:not(.navStaging) main,#view[data-route="token"]:not(.navStaging) main{display:grid;grid-template-columns:minmax(0,7fr) minmax(0,5fr);column-gap:28px;align-items:start;grid-auto-flow:dense}
+  #view[data-route="asset"] main>.backBtn,#view[data-route="token"] main>.backBtn{grid-column:1/-1;justify-self:start}
+  #view[data-route="asset"] main>.dHead,#view[data-route="token"] main>.dHead{grid-column:1}
+  #view[data-route="asset"] main>.dChart{grid-column:1;margin-left:0;margin-right:0}
+  #view[data-route="asset"] main>.chartCap{grid-column:1;margin-left:0;margin-right:0}
+  #view[data-route="asset"] main>.dNote{grid-column:1;margin-left:0;margin-right:0}
+  #view[data-route="asset"] main>.dPair{grid-column:1;margin-left:0;margin-right:0}
+  #view[data-route="asset"] main>.gGroup,#view[data-route="token"] main>.gGroup{grid-column:2;margin:0 0 26px}
+
+  /* Hyperliquid market: chart left, market stats + trade right. */
+  #view[data-route="hlmarket"]>main{display:grid;grid-template-columns:minmax(0,7fr) minmax(0,5fr);column-gap:28px;align-items:start;grid-auto-flow:dense}
+  #view[data-route="hlmarket"] .backBtn{grid-column:1/-1;justify-self:start}
+  #view[data-route="hlmarket"] .dHead{grid-column:1}
+  #view[data-route="hlmarket"] .chartBox{grid-column:1}
+  #view[data-route="hlmarket"] .gGroup{grid-column:2;margin:0 0 26px}
+  #view[data-route="hlmarket"] #hlTradeZone{grid-column:2}
+  #view[data-route="hlmarket"] #hlTradeZone .gGroup{margin:0 0 26px}
+
+  /* Polymarket detail: question + chart + book left, trade panel
+     + positions right. */
+  .polyMain{display:grid;grid-template-columns:minmax(0,7fr) minmax(0,5fr);column-gap:28px;align-items:start;grid-auto-flow:dense;padding-bottom:48px}
+  .polyMain>.backBtn{grid-column:1/-1;justify-self:start}
+  .polyMain>*{grid-column:1}
+  .polyMain>.gGroup{margin:0 0 26px}
+  .polyMain>.gGroup:has(.polyPanel),.polyMain>div:has(>.qtPanel){grid-column:2}
+  .polyMain>#polyPosBox,.polyMain>#polyOrdersBox,.polyMain>#polyHistBox{grid-column:2}
+
+  /* Invest: prediction cards pair up; wider screens get a third
+     column (below). */
+  .polyGrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;align-items:start}
+
+  /* Collectibles: four across. */
+  .nftGrid{grid-template-columns:repeat(4,1fr)}
+  .nftGrid2{grid-template-columns:repeat(4,1fr)}
+
+  /* Discover: featured cards four across, dApp rows pair up. */
+  #dappFeat .featRow{grid-template-columns:repeat(4,1fr)}
+  #dappList{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;padding:0 16px;align-items:start}
+  #dappList .dappRow{width:auto;margin:0}
+
+  /* Swap: the card becomes a centred form column. */
+  #view[data-route="swap"] .swapCard{max-width:600px;margin-left:auto;margin-right:auto}
+  #view[data-route="swap"] .securityNote{max-width:600px;margin-left:auto!important;margin-right:auto!important}
+
+  /* Keyboard focus is visible on desktop. */
+  :focus-visible{outline:2px solid rgba(199,208,218,.75);outline-offset:2px}
+}
+@media (min-width:1440px){
+  .polyGrid{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .nftGrid{grid-template-columns:repeat(5,1fr)}
+  .nftGrid2{grid-template-columns:repeat(5,1fr)}
+}
+/* Pointer affordances: quiet fills on hover, desktop only. */
+@media (hover:hover) and (min-width:1024px){
+  .aRow:hover,.sRow:hover,.sheetRow:hover,.assetRow:hover,.actRow:hover,.lRow:hover{background:var(--fill05)}
+  .dappRow:hover,.polyCard:hover,.featCard:hover{border-color:rgba(199,208,218,.35)}
+  .nftCard:hover{background:var(--fill05)}
+  .nftCard2:hover .nftName{color:#fff}
+}
