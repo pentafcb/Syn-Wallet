@@ -1,9 +1,9 @@
 {
-  "build": "20261122T053640Z-0e2d064",
-  "generatedAt": "2026-11-22T05:36:53.679Z",
+  "build": "20261123T045327Z-a48a3d0",
+  "generatedAt": "2026-11-23T04:53:40.701Z",
   "bundle": {
-    "path": "/assets/index-B2N0gISm.js",
-    "sha256": "835ebfb41d71175347bdbd1ecdc20e2cbed7f893d387ae25463822d8b9960855"
+    "path": "/assets/index-BJgBykjU.js",
+    "sha256": "373d385f044ce3f04deba765dca90fd4b7c403c55d6a131a0af85a440afe2de9"
   },
   "endpoints": [
     "1rpc.io",
@@ -622,11 +622,11 @@
     "assets/dapps/sushiswap.png": "88d7134266c7bd9234b0b6c9159b0908d60d8117b10dfdaaf165c4c7170d94af",
     "assets/dapps/uniswap.ico": "a5c35d7c371a6cf3df75a791053b7411ce29af0841aa81edacdc787ed51056e3",
     "assets/dapps/yearn.png": "bc1cd1dda61714bebfb1d1ae58ee0700386ab38948d229c23cfa278e3fb9b9cf",
-    "assets/dist-BETPdRU9.js": "4fbfe50e58c1af1b8467981bc47be29019ba11a33d7dbdd1f275b9d8acbe6a05",
+    "assets/dist-DBwkLWoY.js": "82d42e5c5c15df9cfba3ed5f3ce3cde8b9f052c29e95da4f65f2b2846da62bc6",
     "assets/dotgothic16-latin-400-normal-BYJEY5oh.woff2": "d29abf817463fdba7e9e87fc954cfa2b60ea6534e8a79c46e858a0dc5aa6a6f6",
     "assets/dotgothic16-latin-400-normal-cp5t3xa_.woff": "32719b3cc5f047dc2de1dc17740ec1ee58afd18109a599d082ee3afd117ba260",
-    "assets/index-B2N0gISm.js": "835ebfb41d71175347bdbd1ecdc20e2cbed7f893d387ae25463822d8b9960855",
-    "assets/index-CZV2Khky.js": "74761352c83e8199aba52c9c716373870ae5a4c8e72c43343a58271989e1fd09",
+    "assets/index-BJgBykjU.js": "373d385f044ce3f04deba765dca90fd4b7c403c55d6a131a0af85a440afe2de9",
+    "assets/index-CFRvJ5Js.js": "417032dd4094a326dd60d29145ab73a7b0c9e16092c56c24fac197eb57659acb",
     "assets/index-e8ZnY61R.css": "7ac790d8cb7ba7a665e9fb10dd03f38796a50c77295c3b8324ebe5a696fce229",
     "assets/logo-sm.png": "b954b654562754b63ba30096a8f4fcc8b54f2d03b4a097ea2da80540c356b175",
     "assets/logo.png": "54467e48b52f7e800ea182eef6c12b8e656b4081424ce4556274c2c765a1190b",
@@ -1357,12 +1357,12 @@
     "assets/u/ZORA.png": "71f855de8edabbd9e6351f29abcc129f7eb9ba5fcd1936ac223d0a6c5710293f",
     "assets/welcome-bg-wide.jpg": "7bf16a295f47ff9701eaee51a17205cb6cce57457f44f81509961365ee12a656",
     "assets/welcome-bg.jpg": "71cc152e92c966440f6168fbb01c04476e7accf78e8af5100e7bbd1bf6b14734",
-    "boot-watchdog.js": "89802afd06e8f269cc92382ec4c42574a657a0bc6545cc9bdc2adcd6dfae47e3",
+    "boot-watchdog.js": "a73f9b81df4de8535b7cf26c2e2c100cbf4ba5e05e6af04898925adec62461fc",
     "fonts/allo/Allo-BoldOblique.woff2": "9e082bc4cebc49cf641d5a9f9e58382f54fca5442740a003cc8643096e259399",
     "fonts/allo/Allo-Oblique.woff2": "da4f8b24e1b49ac7b92f1ac0736229743e66a3296073a53f8e11e8b4a0eb2f64",
     "fonts/allo/AlloVariable.woff2": "482bec1444dabaf1a493b34aa926bb7751ef5edc3e5a9f90a4111c7bb1e0c0ec",
     "fonts/allo/OFL.txt": "abd0d6f604be7d1471efaa0bf89bca030d4a666437bfb507b85974d127902690",
-    "index.html": "70321ac3336dfbdb641c1795b375a978bee8fa319004737470834b1bf60d0f3a",
+    "index.html": "0234699722ea4ab6ffb8df0cc92b34ac4a8d68d72f17b7177f723487e6a49099",
     "logo.png": "54467e48b52f7e800ea182eef6c12b8e656b4081424ce4556274c2c765a1190b",
     "manifest.webmanifest": "cf0e45620f30a7225d4af29bd34f01ddb3771748cccb377c3ca9ebe496b8281c",
     "sw.js": "551a472da88c7f8e69bd8d6cc510038b4517c0ed207ccc2d4c3516b74b145a99",
