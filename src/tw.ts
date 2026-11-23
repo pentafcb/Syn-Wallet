@@ -234,7 +234,13 @@ export async function twTickers(assetIds: string[]): Promise<Record<string, TwTi
       const j = await twCall('POST', '/v2/market/tickers', {}, { currency: 'USD', assets: missing.slice(0, 50) });
       return normalizeTickers(j);
     });
-    for (const [k, v] of Object.entries(fresh)) { cache.set(`tk:${k}`, { at: Date.now(), v }); out[k] = v; }
+    for (const [k, v] of Object.entries(fresh)) {
+      // Deep audit 2026-11-22: ticker writes bypassed the bounded
+      // cached() path and grew the shared cache without limit.
+      const key = `tk:${k}`;
+      if (!cache.has(key) && cache.size >= 500) { const first = cache.keys().next().value; if (first !== undefined) cache.delete(first); }
+      cache.set(key, { at: Date.now(), v }); out[k] = v;
+    }
   }
   return out;
 }

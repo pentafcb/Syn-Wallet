@@ -64,7 +64,24 @@ export function isSafeMediaUrl(u: string): boolean {
   if (s.startsWith('data:')) return /^data:image\/(png|gif|jpe?g|webp|avif);base64,[A-Za-z0-9+/=]+$/.test(s);
   try {
     const url = new URL(s);
-    return url.protocol === 'https:' && !url.username && !url.password && !!url.hostname;
+    if (url.protocol !== 'https:' || url.username || url.password || !url.hostname) return false;
+    // Deep audit 2026-11-22: an https URL on a private / loopback /
+    // link-local host is not public media — NFT metadata pointing at
+    // LAN names would otherwise make the browser probe the local
+    // network (img-src permits any https host). Reject IP literals in
+    // private ranges, localhost and *.local names.
+    const h = url.hostname.toLowerCase();
+    if (h === 'localhost' || h.endsWith('.local')) return false;
+    const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+    if (v4) {
+      const [a, b] = [Number(v4[1]), Number(v4[2])];
+      if (a === 10 || a === 127 || a === 0 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254) || (a === 100 && b >= 64 && b <= 127)) return false;
+    }
+    if (h.includes(':')) { // IPv6 literal
+      const inner = h.replace(/^\[|\]$/g, '');
+      if (inner === '::1' || inner.startsWith('fe8') || inner.startsWith('fe9') || inner.startsWith('fea') || inner.startsWith('feb') || inner.startsWith('fc') || inner.startsWith('fd')) return false;
+    }
+    return true;
   } catch { return false; }
 }
 

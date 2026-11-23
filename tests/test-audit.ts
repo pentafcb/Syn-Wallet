@@ -74,7 +74,11 @@ const RECIP = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8';
 const TOKEN = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48';
 const ROUTER = '0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE';
 const exp = { fromChainId: 1, fromToken: TOKEN, fromAmountRaw: '1000000', toAddress: RECIP, approvalAddress: ROUTER };
-const goodData = '0x12345678' + '000000000000000000000000' + TOKEN.slice(2).toLowerCase() + '000000000000000000000000' + RECIP.slice(2).toLowerCase();
+// Deep audit 2026-11-22: the fixture now also carries the input
+// amount as a 32-byte word, as real LI.FI calldata does in its swap
+// segment — the verifier now requires that exact word (a payload
+// spending a different amount than reviewed must be refused).
+const goodData = '0x12345678' + '000000000000000000000000' + TOKEN.slice(2).toLowerCase() + '000000000000000000000000' + RECIP.slice(2).toLowerCase() + (1000000n).toString(16).padStart(64, '0');
 assert.equal(verifyLifiEvmTx({ to: ROUTER, chainId: 1, value: '0', data: goodData }, exp), null, 'a faithful built tx verifies');
 assert.ok(verifyLifiEvmTx({ to: '0x000000000000000000000000000000000000dEaD', chainId: 1, value: '0', data: goodData }, exp), 'wrong destination refused');
 assert.ok(verifyLifiEvmTx({ to: ROUTER, chainId: 137, value: '0', data: goodData }, exp), 'wrong chain refused');

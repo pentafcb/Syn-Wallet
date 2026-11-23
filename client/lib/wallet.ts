@@ -75,6 +75,12 @@ export async function encryptVault(plaintext: string, password: string): Promise
   return { v: 1, salt: b64(salt), iv: b64(iv), ct: b64(ct) };
 }
 export async function decryptVault(blob: VaultBlob, password: string): Promise<string> {
+  // Deep audit 2026-11-22: the unlock path never checked the blob
+  // version (the backup-import path already enforces v === 1). Gate it
+  // here too, so a future format change has a real migration hook and
+  // a foreign/corrupt blob fails closed instead of being fed to the
+  // KDF. encryptVault has only ever written v: 1.
+  if (!blob || (blob as VaultBlob).v !== 1) throw new Error('Unsupported vault version.');
   const key = await vaultKey(password, unb64(blob.salt));
   const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(blob.iv) as BufferSource }, key, unb64(blob.ct) as BufferSource);
   return new TextDecoder().decode(pt);
@@ -111,6 +117,7 @@ export interface DerivedAccounts2 extends DerivedAccounts {
   accountIndex: number;
   ltcPrivateKeyHex: string; ltcAddress: string; ltcLegacyAddress: string; ltcNestedAddress: string;
   solTWSeed32: Uint8Array; solTWAddress: string;
+  solPhantomSeed32: Uint8Array; solPhantomAddress: string;
   tronPrivateKeyHex: string; tronAddress: string;
   xrpPrivateKeyHex: string; xrpAddress: string;
   cosmosPrivateKeyHex: string; cosmosAddress: string;
@@ -125,6 +132,13 @@ export function deriveAll2(mnemonic: string, accountIndex = 0): DerivedAccounts2
   // Solana — Trust Wallet path m/44'/501'/acct' (account level, no change/index legs)
   const solTWSeed32 = slip10Derive(seed, [44, 501, acct]);
   const solTWAddress = solanaAddressFromSeed32(solTWSeed32);
+  // Solana — Phantom path m/44'/501'/acct'/0'/0' (full BIP44 shape:
+  // account + change + address-index legs). Surfaced as its own
+  // account so a phrase imported from Phantom finds the exact address
+  // Phantom showed. The primary Solana account keeps the wallet's
+  // original m/44'/501'/acct'/0' derivation and never changes.
+  const solPhantomSeed32 = slip10Derive(seed, [44, 501, acct, 0, 0]);
+  const solPhantomAddress = solanaAddressFromSeed32(solPhantomSeed32);
   // TRON — secp256k1 m/44'/195'/0'/0/acct
   const tronNode = master.derive(`m/44'/195'/0'/0/${acct}`);
   if (!tronNode.privateKey || !tronNode.publicKey) throw new Error('tron derivation failed');
@@ -171,7 +185,7 @@ export function deriveAll2(mnemonic: string, accountIndex = 0): DerivedAccounts2
   const ltcLegacyAddress = btc.p2pkh(ltc44.publicKey!, LTC_NET).address!;
   const ltc49 = master.derive(`m/49'/2'/0'/0/${acct}`);
   const ltcNestedAddress = btc.p2sh(btc.p2wpkh(ltc49.publicKey!, LTC_NET), LTC_NET).address!;
-  return { ...base, accountIndex, ltcPrivateKeyHex, ltcAddress, ltcLegacyAddress, ltcNestedAddress, solTWSeed32, solTWAddress, tronPrivateKeyHex, tronAddress, xrpPrivateKeyHex, xrpAddress, cosmosPrivateKeyHex, cosmosAddress, suiSeed32, suiAddress, aptosSeed32, aptosAddress };
+  return { ...base, accountIndex, ltcPrivateKeyHex, ltcAddress, ltcLegacyAddress, ltcNestedAddress, solTWSeed32, solTWAddress, solPhantomSeed32, solPhantomAddress, tronPrivateKeyHex, tronAddress, xrpPrivateKeyHex, xrpAddress, cosmosPrivateKeyHex, cosmosAddress, suiSeed32, suiAddress, aptosSeed32, aptosAddress };
 }
 import { secp256k1 } from '@noble/curves/secp256k1';
 function secp256k1Point(priv: Uint8Array, compressed: boolean): Uint8Array {
@@ -239,4 +253,27 @@ export async function unwrapWithRawKey(blob: KeyWrapBlob, rawKey: Uint8Array): P
   const key = await crypto.subtle.importKey('raw', rawKey as BufferSource, 'AES-GCM', false, ['decrypt']);
   const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(blob.iv) as BufferSource }, key, unb64(blob.ct) as BufferSource);
   return new TextDecoder().decode(pt);
+}
+
+// Deep audit 2026-11-22 (P1): pre-sign verification for remotely
+// built TRON transfers. TronGrid builds the transaction and the
+// wallet signs its hash — so before signing, prove (1) the txID is
+// exactly the sha256 of the raw data being signed, and (2) the single
+// TransferContract inside names the expected owner, recipient and
+// amount. Any mismatch → false → the caller refuses to sign.
+export function verifyTronTransferTx(tx: any, ownerHex: string, toHex: string, amountSun: number): boolean {
+  try {
+    if (!tx || !tx.txID || !tx.raw_data_hex) return false;
+    const rawHex = String(tx.raw_data_hex);
+    if (!/^[0-9a-fA-F]+$/.test(rawHex)) return false;
+    // NB: @scure/base's base16 is UPPERCASE-only — decode the
+    // uppercased form and compare hashes case-insensitively.
+    if (base16.encode(sha256(base16.decode(rawHex.toUpperCase()))) !== String(tx.txID).toUpperCase()) return false;
+    const contracts = tx.raw_data?.contract;
+    if (!Array.isArray(contracts) || contracts.length !== 1 || contracts[0]?.type !== 'TransferContract') return false;
+    const cv = contracts[0]?.parameter?.value || {};
+    return String(cv.owner_address || '').toLowerCase() === ownerHex.toLowerCase()
+      && String(cv.to_address || '').toLowerCase() === toHex.toLowerCase()
+      && Number(cv.amount) === amountSun;
+  } catch { return false; }
 }

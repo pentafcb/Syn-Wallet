@@ -353,23 +353,16 @@ export async function l2Headers(creds: ClobCreds, address: string, method: strin
   return { POLY_ADDRESS: address, POLY_SIGNATURE: sig, POLY_TIMESTAMP: String(ts), POLY_API_KEY: creds.apiKey, POLY_PASSPHRASE: creds.passphrase };
 }
 
-// ---- Builder API credentials via OUR server's remote signing ----
-// In CLOB V2 these POLY_BUILDER_* headers no longer attribute orders
+// ---- Builder-authenticated relayer submissions ----
+// In CLOB V2 the POLY_BUILDER_* headers no longer attribute orders
 // (the signed `builder` field does that). They remain the auth for
 // Builder-authenticated RELAYER submissions (gasless wallet
-// deployment / approvals / transfers) — the only consumer left is
-// relayerSubmit below. Only request metadata crosses to our server
-// (method + path + the exact body string) — never user keys or CLOB
-// secrets.
-export type BuilderHeaders = Record<string, string>;
-export async function builderHeaders(method: string, path: string, body: string): Promise<BuilderHeaders | null> {
-  try {
-    const r = await fetch('/api/polymarket/sign', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ method, path, body }), signal: AbortSignal.timeout(8000) });
-    if (!r.ok) return null;
-    const j = await r.json();
-    return j?.POLY_BUILDER_API_KEY ? j as BuilderHeaders : null;
-  } catch { return null; }
-}
+// deployment / approvals / transfers) — the only consumer is
+// relayerSubmit below. Deep audit 2026-11-22: the browser no longer
+// receives builder headers at all — submissions go through our
+// server's /api/polymarket/relayer-submit proxy, which signs and
+// forwards server-side, so the builder API key/passphrase never
+// leave the server.
 export async function builderConfigured(): Promise<boolean> {
   try { const r = await fetch('/api/polymarket/builder-status'); const j = await r.json(); return !!j?.configured; } catch { return false; }
 }
@@ -553,12 +546,10 @@ export async function relayerDeployed(address: string, type: 'SAFE' | 'WALLET' =
   } catch { return null; }
 }
 export async function relayerSubmit(tx: Record<string, unknown>): Promise<{ ok: boolean; transactionId?: string; error?: string }> {
-  const body = JSON.stringify(tx);
-  const bh = await builderHeaders('POST', '/submit', body);
-  if (!bh) return { ok: false, error: 'builder_not_configured' };
   try {
-    const r = await fetch(RELAYER + '/submit', { method: 'POST', headers: { 'content-type': 'application/json', ...bh }, body, signal: AbortSignal.timeout(15000) });
+    const r = await fetch('/api/polymarket/relayer-submit', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(tx), signal: AbortSignal.timeout(20000) });
     const j = await r.json().catch(() => ({}));
+    if ((j as any)?.error === 'builder_not_configured') return { ok: false, error: 'builder_not_configured' };
     if (r.ok && (j as any)?.transactionID) return { ok: true, transactionId: String((j as any).transactionID) };
     return { ok: false, error: String((j as any)?.error || 'relayer rejected the transaction (HTTP ' + r.status + ')') };
   } catch (e) { return { ok: false, error: 'Network error reaching the relayer: ' + (e instanceof Error ? e.message : String(e)) }; }

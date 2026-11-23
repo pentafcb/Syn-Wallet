@@ -186,12 +186,19 @@ export async function fetchLifiQuote(p: LifiQuoteParams): Promise<any> {
 const LIFI_NATIVE_TOKENS = new Set(['0x0000000000000000000000000000000000000000', '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee']);
 const FORBIDDEN_SELECTORS = new Set(['0xa9059cbb', '0x095ea7b3', '0x23b872dd']); // transfer / approve / transferFrom as the OUTER call
 
+// The LI.FI Diamond proxy — the outer call target of every LI.FI EVM
+// route, deployed at this same address on every supported chain. When
+// a quote carries no approvalAddress, the diamond is the only target
+// the wallet will sign for (deep audit 2026-11-22: previously the
+// destination went completely unverified in that case).
+export const LIFI_DIAMOND = '0x1231deb6f5749ef6ce6943a275a1d3e7486f4eae';
 export interface LifiTxExpect { fromChainId: number; fromToken: string; fromAmountRaw: string; toAddress: string; approvalAddress?: string; }
 export function verifyLifiEvmTx(tr: any, exp: LifiTxExpect): string | null {
   if (!tr || typeof tr !== 'object') return 'LI.FI returned no transaction to verify.';
   const to = typeof tr.to === 'string' ? tr.to.toLowerCase() : '';
   if (!/^0x[0-9a-f]{40}$/.test(to)) return 'The built transaction has no valid destination.';
-  if (exp.approvalAddress && to !== exp.approvalAddress.toLowerCase()) {
+  const expectedTo = exp.approvalAddress ? exp.approvalAddress.toLowerCase() : LIFI_DIAMOND;
+  if (to !== expectedTo) {
     return 'The built transaction goes to a different contract than the one in the reviewed quote. Refusing to sign.';
   }
   if (tr.chainId != null && Number(tr.chainId) !== exp.fromChainId) return 'The built transaction is for a different network than the reviewed quote. Refusing to sign.';
@@ -206,6 +213,17 @@ export function verifyLifiEvmTx(tr: any, exp: LifiTxExpect): string | null {
   const body = data.slice(2);
   if (!body.includes(exp.toAddress.toLowerCase().slice(2))) return 'The built transaction does not pay the reviewed recipient. Refusing to sign.';
   if (!nativeIn && !body.includes(exp.fromToken.toLowerCase().slice(2))) return 'The built transaction does not reference the reviewed input token. Refusing to sign.';
+  // Deep audit 2026-11-22: for ERC-20 inputs the spent amount lives
+  // inside the router calldata (the tx value is 0), and it was never
+  // compared — a built tx could spend any amount up to the user's
+  // allowance as long as the reviewed strings appeared somewhere.
+  // Require the exact 32-byte big-endian word of the reviewed raw
+  // amount to be present in the calldata.
+  if (!nativeIn) {
+    let amtWord = '';
+    try { amtWord = BigInt(exp.fromAmountRaw).toString(16).padStart(64, '0'); } catch { return 'The reviewed input amount is unreadable. Refusing to sign.'; }
+    if (amtWord.length !== 64 || !body.includes(amtWord)) return 'The built transaction does not spend the reviewed input amount. Refusing to sign.';
+  }
   const gas = tr.gasLimit != null ? Number(tr.gasLimit) : tr.gas != null ? Number(tr.gas) : NaN;
   if (Number.isFinite(gas) && gas > 20_000_000) return 'The built transaction asks for an unreasonable gas limit. Refusing to sign.';
   return null;

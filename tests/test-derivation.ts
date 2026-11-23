@@ -13,6 +13,9 @@ assert.equal(d.evmAddress, '0x9858EfFD232B4033E47d90003D41EC34EcaEda94', 'ETH ve
 assert.equal(d.btcAddress, 'bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu', 'BTC segwit vector');
 // Solana: address must equal @solana/web3.js Keypair.fromSeed(derived seed32)
 assert.equal(Keypair.fromSeed(d.solSeed32).publicKey.toBase58(), d.solAddress, 'SOL consistency with web3.js');
+// The primary Solana account is m/44'/501'/0'/0' — pinned literally so
+// the Phantom addition below can never silently move existing users.
+assert.equal(d.solAddress, 'HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk', 'SOL primary path vector (m/44\'/501\'/0\'/0\')');
 // Second known ETH vector: same mnemonic via m/44'/60'/0'/0/0 is the standard MetaMask first account
 
 // ---- Addition 9: canonical private-key EXPORT formats round-trip ----
@@ -29,6 +32,16 @@ assert.equal(solRaw.length, 64, 'Solana export is 64 bytes');
 assert.equal(Keypair.fromSecretKey(solRaw).publicKey.toBase58(), d2.solAddress, 'Solana: revealed key re-imports to the wallet address');
 const solTwRaw = base58.decode(solanaSecretKeyBase58(d2.solTWSeed32));
 assert.equal(Keypair.fromSecretKey(solTwRaw).publicKey.toBase58(), d2.solTWAddress, 'Solana TW path: revealed key re-imports to the wallet address');
+// Solana Phantom path m/44'/501'/0'/0'/0': the expectation was computed
+// independently of wallet.ts (a from-spec SLIP-0010 implementation over
+// the same standard phrase) and matches the deep audit's live probe
+// pair (app HAgk14Jp… vs Phantom B9sVeu4r…).
+assert.equal(d2.solPhantomAddress, 'B9sVeu4rJU12oUrUtzjc6BSNuEXdfvurZkdcaTVkP2LY', 'Solana Phantom path vector (m/44\'/501\'/0\'/0\'/0\')');
+assert.equal(Keypair.fromSeed(d2.solPhantomSeed32).publicKey.toBase58(), d2.solPhantomAddress, 'Solana Phantom: consistency with web3.js');
+assert.notEqual(d2.solPhantomAddress, d2.solAddress, 'Phantom account is a different address from the primary Solana account');
+assert.notEqual(d2.solPhantomAddress, d2.solTWAddress, 'Phantom account is a different address from the TW-path account');
+const solPhRaw = base58.decode(solanaSecretKeyBase58(d2.solPhantomSeed32));
+assert.equal(Keypair.fromSecretKey(solPhRaw).publicKey.toBase58(), d2.solPhantomAddress, 'Solana Phantom path: revealed key re-imports to the wallet address (into Phantom itself)');
 // Bitcoin WIF: base58check 0x80 || key || 0x01, checksum valid, key matches.
 const wif = btcWifFromPrivateKey(base16.decode(d2.btcPrivateKeyHex));
 const wifRaw = base58.decode(wif);

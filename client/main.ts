@@ -1,7 +1,7 @@
 import '@fontsource/dotgothic16/latin-400.css';
 import './style.css';
-import { createMnemonic, isValidMnemonic, normalizeMnemonic, deriveAll, deriveAll2, encryptVault, decryptVault, bip39Wordlist, parseVaultPlaintext, packVaultPayload, newWalletId, wrapWithRawKey, unwrapWithRawKey, solanaSecretKeyBase58, btcWifFromPrivateKey, utxoWifFromPrivateKey, suiPrivateKeyBech32, aptosPrivateKeyExport, base16, MIN_PASSWORD_LENGTH, type VaultBlob, type VaultPayload, type WalletEntry, type DerivedAccounts2, type KeyWrapBlob } from './lib/wallet';
-import { isValidUtxoAddress, buildUtxoSend, estimateUtxoFeeSats, utxoParams, type Utxo } from './lib/utxo';
+import { createMnemonic, isValidMnemonic, normalizeMnemonic, deriveAll, deriveAll2, encryptVault, decryptVault, bip39Wordlist, parseVaultPlaintext, packVaultPayload, newWalletId, wrapWithRawKey, unwrapWithRawKey, solanaSecretKeyBase58, btcWifFromPrivateKey, utxoWifFromPrivateKey, suiPrivateKeyBech32, aptosPrivateKeyExport, verifyTronTransferTx, base16, MIN_PASSWORD_LENGTH, type VaultBlob, type VaultPayload, type WalletEntry, type DerivedAccounts2, type KeyWrapBlob } from './lib/wallet';
+import { isValidUtxoAddress, buildUtxoSend, estimateUtxoFeeSats, selectCoins, utxoParams, type Utxo } from './lib/utxo';
 import { EVM_REGISTRY } from './lib/chains-data';
 import { validateCustomNetwork, parseChainIdResult, sanitizeTokenText, isValidTronAddress } from './lib/netvalidate';
 import { getAssociatedTokenAddressSync, createAssociatedTokenAccountInstruction, createTransferCheckedInstruction, createTransferInstruction, createRevokeInstruction } from '@solana/spl-token';
@@ -33,11 +33,12 @@ import { ethers } from 'ethers';
 import QRCode from 'qrcode';
 import bs58 from 'bs58';
 
-export type ChainKind = 'evm' | 'solana' | 'solana-tw' | 'bitcoin' | 'tron' | 'xrp' | 'cosmos' | 'sui' | 'aptos';
+export type ChainKind = 'evm' | 'solana' | 'solana-tw' | 'solana-phantom' | 'bitcoin' | 'tron' | 'xrp' | 'cosmos' | 'sui' | 'aptos';
 interface Chain { id: string; name: string; symbol: string; cg: string; decimals: number; explorerAddr: string; explorerTx: string; evmId?: number; blockscout?: string; img: string; kind: ChainKind; rpc?: string; proxy?: boolean; custom?: boolean; }
 const BASE_CHAINS: Chain[] = [
   { id: 'solana', name: 'Solana', symbol: 'SOL', cg: 'solana', decimals: 9, explorerAddr: 'https://solscan.io/account/', explorerTx: 'https://solscan.io/tx/', img: '/assets/coins/solana.png', kind: 'solana', proxy: true },
   { id: 'solana-tw', name: 'Solana (Trust Wallet)', symbol: 'SOL', cg: 'solana', decimals: 9, explorerAddr: 'https://solscan.io/account/', explorerTx: 'https://solscan.io/tx/', img: '/assets/coins/solana.png', kind: 'solana-tw', proxy: true },
+  { id: 'solana-phantom', name: 'Solana (Phantom)', symbol: 'SOL', cg: 'solana', decimals: 9, explorerAddr: 'https://solscan.io/account/', explorerTx: 'https://solscan.io/tx/', img: '/assets/coins/solana.png', kind: 'solana-phantom', proxy: true },
   { id: 'ethereum', name: 'Ethereum', symbol: 'ETH', cg: 'ethereum', decimals: 18, explorerAddr: 'https://etherscan.io/address/', explorerTx: 'https://etherscan.io/tx/', evmId: 1, blockscout: 'https://eth.blockscout.com', img: '/assets/coins/ethereum.png', kind: 'evm', proxy: true },
   { id: 'polygon', name: 'Polygon', symbol: 'MATIC', cg: 'polygon-ecosystem-token', decimals: 18, explorerAddr: 'https://polygonscan.com/address/', explorerTx: 'https://polygonscan.com/tx/', evmId: 137, blockscout: 'https://polygon.blockscout.com', img: '/assets/coins/polygon.png', kind: 'evm', proxy: true },
   { id: 'bnb', name: 'BNB Chain', symbol: 'BNB', cg: 'binancecoin', decimals: 18, explorerAddr: 'https://bscscan.com/address/', explorerTx: 'https://bscscan.com/tx/', evmId: 56, blockscout: 'https://bsc.blockscout.com', img: '/assets/coins/bnb.png', kind: 'evm', proxy: true },
@@ -158,10 +159,33 @@ let appPassword: string | null = null;
 function activeWallet(): WalletEntry | null { if (!vaultPayload) return null; return vaultPayload.wallets.find(w => w.id === vaultPayload!.activeId) || vaultPayload.wallets[0] || null; }
 function accountIdx(): number { const w = activeWallet(); if (!w) return 0; return Math.max(0, Math.min(config.accountIndex[w.id] || 0, Math.max(0, w.accounts - 1))); }
 function accKey(): string { const w = activeWallet(); return w ? w.id + ':' + accountIdx() : ''; }
+function vaultSaveAlert() {
+  if (document.getElementById('vaultSaveAlert')) return;
+  const d = document.createElement('div');
+  d.id = 'vaultSaveAlert';
+  d.setAttribute('style', 'position:fixed;top:calc(10px + env(safe-area-inset-top));left:12px;right:12px;z-index:9999;background:#3a1420;border:1px solid #ff5c7a;color:#ffd7de;border-radius:14px;padding:12px 14px;font-size:13px;line-height:1.45;box-shadow:0 12px 32px rgba(0,0,0,.5)');
+  d.textContent = 'Your wallet could not be saved on this device — storage is full or blocked. Free space or check the browser storage settings before making changes, or they will be lost when this tab closes.';
+  const x = document.createElement('button');
+  x.textContent = 'Dismiss'; x.setAttribute('style', 'margin-top:8px;background:transparent;border:1px solid #ff5c7a;color:#ffd7de;border-radius:999px;padding:5px 12px;font-size:12px');
+  x.onclick = () => d.remove();
+  d.appendChild(document.createElement('br')); d.appendChild(x);
+  document.body.appendChild(d);
+}
 async function persistPayload() {
   if (!vaultPayload || !appPassword) return;
   const blob = await encryptVault(packVaultPayload(vaultPayload), appPassword);
-  localStorage.setItem(VAULT_KEY, JSON.stringify(blob));
+  const text = JSON.stringify(blob);
+  try { localStorage.setItem(VAULT_KEY, text); }
+  catch {
+    // Deep audit 2026-11-22: this was the one unguarded vault write
+    // in the app — on a full/blocked store the new wallet state
+    // silently never persisted. Free the disposable caches and retry
+    // once; if it still fails, say so loudly and fail the operation —
+    // a wallet that cannot save must never pretend it did.
+    try { localStorage.removeItem(DATA_CACHE_KEY); localStorage.removeItem(SNAPS_KEY); } catch { /* ignore */ }
+    try { localStorage.setItem(VAULT_KEY, text); }
+    catch { vaultSaveAlert(); throw new Error('Could not save the wallet on this device — storage is full or blocked.'); }
+  }
   const w = activeWallet(); if (w) localStorage.setItem(META_KEY, JSON.stringify({ kind: w.kind, chain: w.chain, createdAt: w.createdAt } satisfies Meta));
 }
 function applyActiveWallet() {
@@ -444,6 +468,7 @@ function addressFor(c: Chain): string {
   switch (c.kind) {
     case 'solana': return derived2.solAddress;
     case 'solana-tw': return derived2.solTWAddress;
+    case 'solana-phantom': return derived2.solPhantomAddress;
     case 'bitcoin': return c.id === 'litecoin' ? derived2.ltcAddress : derived2.btcAddress;
     case 'tron': return derived2.tronAddress;
     case 'xrp': return derived2.xrpAddress;
@@ -454,7 +479,7 @@ function addressFor(c: Chain): string {
     default: return '';
   }
 }
-function visibleChains(): Chain[] { const en = enabledSet(); return CHAINS.filter(c => en.has(c.id === 'solana-tw' ? 'solana' : c.id) && (c.id !== 'solana-tw' || showSolTW) && addressFor(c)); }
+function visibleChains(): Chain[] { const en = enabledSet(); return CHAINS.filter(c => en.has(c.id === 'solana-tw' || c.id === 'solana-phantom' ? 'solana' : c.id) && (c.id !== 'solana-tw' || showSolTW) && addressFor(c)); }
 // ---------- app config + chain assembly (Wave 1A) ----------
 // Non-secret app configuration lives in localStorage next to the vault:
 // enabled networks, custom networks, RPC overrides, custom tokens, the
@@ -522,7 +547,7 @@ function sanitizeTokenDef(t: any): TokenDef | null {
   if (typeof t.contract !== 'string' || t.contract.length > 128) return null;
   const base = BASE_CHAINS.find(c => c.id === t.chainId);
   if (base?.kind === 'evm' && !/^0x[0-9a-fA-F]{40}$/.test(t.contract)) return null;
-  if ((base?.kind === 'solana' || base?.kind === 'solana-tw') && !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(t.contract)) return null;
+  if ((base?.kind === 'solana' || base?.kind === 'solana-tw' || base?.kind === 'solana-phantom') && !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(t.contract)) return null;
   if (!Number.isInteger(t.decimals) || t.decimals < 0 || t.decimals > 36) return null;
   return { id: t.id, chainId: t.chainId, contract: t.contract, name, symbol, decimals: t.decimals, cg: typeof t.cg === 'string' && /^[a-z0-9-]{1,60}$/.test(t.cg) ? t.cg : undefined, builtin: t.builtin === true ? true : undefined, logo: t.logo === true ? true : undefined };
 }
@@ -652,6 +677,13 @@ document.addEventListener('pointerdown', touchLock);
 document.addEventListener('visibilitychange', () => { document.documentElement.classList.toggle('animPaused', document.hidden); if (!document.hidden && autoLockOverdue()) lock(); });
 window.addEventListener('focus', () => { if (autoLockOverdue()) lock(); });
 setInterval(() => { if (autoLockOverdue()) lock(); }, 20000);
+// Deep audit 2026-11-22: two unlocked tabs hold two in-memory copies
+// of the vault payload, and a save from the staler tab would silently
+// overwrite the fresher tab's wallets/accounts (last-writer-wins on
+// the whole encrypted blob). If ANOTHER tab rewrites or wipes the
+// vault while this tab is unlocked, lock this tab — unlocking again
+// reloads the fresh payload instead of clobbering it.
+window.addEventListener('storage', (e) => { if (e.key === VAULT_KEY && secret) lock(); });
 // ---------- persisted auth-failure throttling (audit M-3) ----------
 // Failure state lives in localStorage (survives new tabs and reloads —
 // sessionStorage let an attacker reset the clock by opening a tab),
@@ -1195,9 +1227,9 @@ function evmProviderUrl(c: Chain): string { return config.rpcOverrides[c.id] || 
 const BALANCE_SERVICE_CHAINS = new Set(['solana', 'ethereum', 'polygon', 'bnb', 'arbitrum', 'base', 'optimism', 'avalanche', 'fantom', 'zksync', 'bitcoin', 'litecoin', 'tron', 'xrp', 'cosmos', 'sui', 'aptos']);
 async function fetchBalance(c: Chain): Promise<number | null> {
   const addr = addressFor(c); if (!addr) return null;
-  const overrideKey = c.kind === 'solana-tw' ? 'solana' : c.id;
+  const overrideKey = c.kind === 'solana-tw' || c.kind === 'solana-phantom' ? 'solana' : c.id;
   if (config.rpcOverrides[overrideKey]) return fetchBalanceDirect(c);
-  const svc = c.kind === 'solana-tw' ? 'solana' : c.id;
+  const svc = c.kind === 'solana-tw' || c.kind === 'solana-phantom' ? 'solana' : c.id;
   if (BALANCE_SERVICE_CHAINS.has(svc)) {
     try {
       const r = await fetch(`/api/balance/${svc}?address=${encodeURIComponent(addr)}`);
@@ -1211,7 +1243,7 @@ async function fetchBalanceDirect(c: Chain): Promise<number | null> {
   const addr = addressFor(c); if (!addr) return null;
   try {
     switch (c.kind) {
-      case 'solana': case 'solana-tw': { const v = await solanaRpcCall('getBalance', [addr]); return (v?.value ?? v) / 1e9; }
+      case 'solana': case 'solana-tw': case 'solana-phantom': { const v = await solanaRpcCall('getBalance', [addr]); return (v?.value ?? v) / 1e9; }
       case 'bitcoin': { const r = await fetch(`/api/utxo/${c.id}/address/${addr}`); if (!r.ok) return null; const j = await r.json(); return ((j.chain_stats?.funded_txo_sum || 0) - (j.chain_stats?.spent_txo_sum || 0)) / 1e8; }
       case 'tron': { const r = await fetch(`https://api.trongrid.io/v1/accounts/${addr}`); if (!r.ok) return null; const j = await r.json(); const a = j?.data?.[0]; return a ? (a.balance || 0) / 1e6 : 0; }
       case 'xrp': { const r = await fetch('https://xrplcluster.com/', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ method: 'account_info', params: [{ account: addr, ledger_index: 'validated' }] }) }); const j = await r.json(); if (j?.result?.error === 'actNotFound') return 0; const bal = j?.result?.account_data?.Balance; return bal != null ? Number(bal) / 1e6 : null; }
@@ -1225,10 +1257,10 @@ async function fetchBalanceDirect(c: Chain): Promise<number | null> {
 async function fetchTokenBalance(t: TokenDef): Promise<number | null> {
   const c = findChain(t.chainId); if (!c) return null;
   const addr = addressFor(c); if (!addr) return null;
-  const overrideKey = c.kind === 'solana-tw' ? 'solana' : c.id;
+  const overrideKey = c.kind === 'solana-tw' || c.kind === 'solana-phantom' ? 'solana' : c.id;
   if (config.rpcOverrides[overrideKey]) return fetchTokenBalanceDirect(t);
-  const svc = c.kind === 'solana-tw' ? 'solana' : c.id;
-  if ((c.kind === 'evm' || c.kind === 'solana' || c.kind === 'solana-tw') && BALANCE_SERVICE_CHAINS.has(svc)) {
+  const svc = c.kind === 'solana-tw' || c.kind === 'solana-phantom' ? 'solana' : c.id;
+  if ((c.kind === 'evm' || c.kind === 'solana' || c.kind === 'solana-tw' || c.kind === 'solana-phantom') && BALANCE_SERVICE_CHAINS.has(svc)) {
     try {
       const r = await fetch(`/api/balance/${svc}?address=${encodeURIComponent(addr)}&token=${encodeURIComponent(t.contract)}&decimals=${t.decimals}`);
       if (r.ok) { const j = await r.json(); if (typeof j.balance === 'number') return j.balance; }
@@ -1241,7 +1273,7 @@ async function fetchTokenBalanceDirect(t: TokenDef): Promise<number | null> {
   const c = findChain(t.chainId); if (!c) return null;
   const addr = addressFor(c); if (!addr) return null;
   try {
-    if (c.kind === 'solana' || c.kind === 'solana-tw') {
+    if (c.kind === 'solana' || c.kind === 'solana-tw' || c.kind === 'solana-phantom') {
       const v = await solanaRpcCall('getTokenAccountsByOwner', [addr, { mint: t.contract }, { encoding: 'jsonParsed' }]);
       let sum = 0; for (const a of (v?.value || [])) sum += a?.account?.data?.parsed?.info?.tokenAmount?.uiAmount || 0;
       return sum;
@@ -2329,7 +2361,7 @@ function showAsset(chainId: string) {
   clearInterval(chartTimer);
   setView(`<main><button class="backBtn" id="bk" aria-label="Back"><i class="ri-arrow-left-s-line"></i></button>
     <div class="dHead">
-      <div class="dIdRow">${coinIcon(c, true)}<div class="dIdTx"><div class="dName">${c.name}</div><div class="dSym">${c.symbol} · ${esc(addr.slice(0, 6))}…${esc(addr.slice(-4))}</div></div><span class="liveDot">LIVE</span></div>
+      <div class="dIdRow">${coinIcon(c, true)}<div class="dIdTx"><div class="dName">${esc(c.name)}</div><div class="dSym">${esc(c.symbol)} · ${esc(addr.slice(0, 6))}…${esc(addr.slice(-4))}</div></div><span class="liveDot">LIVE</span></div>
       <div class="dBalBlock"><div class="dEyebrow">YOUR BALANCE</div><div class="dBalHero" id="dBalCrypto">…</div><div class="dBalUsd" id="dBalUsd"></div></div>
       <div class="dPriceBlock"><div class="dEyebrow" id="dEyebrow">CURRENT PRICE</div><div class="dPriceRow"><span class="dPriceVal" id="dPrice">…</span><span id="dChange"></span></div></div>
     </div>
@@ -2337,9 +2369,9 @@ function showAsset(chainId: string) {
     ${orbPair('send', () => go({ route: 'receive', chainId: c.id }), () => go({ route: 'send', chainId: c.id }))}
     <div class="gGroup"><div class="gHead">Actions</div><div class="gCard">
       <button class="sRow" id="dSwap"><span class="sIco"><i class="ri-swap-line"></i></span><span class="sTx"><span class="sLbl">Swap <b>${esc(c.symbol)}</b></span></span><span class="sChev"><i class="ri-arrow-right-s-line"></i></span></button>
-      ${(c.kind === 'solana' || c.kind === 'solana-tw') ? '<button class="sRow" id="dStake"><span class="sIco"><i class="ri-seedling-line"></i></span><span class="sTx"><span class="sLbl">Stake <b>SOL</b></span></span><span class="sChev"><i class="ri-arrow-right-s-line"></i></span></button>' : ''}
+      ${(c.kind === 'solana' || c.kind === 'solana-tw' || c.kind === 'solana-phantom') ? '<button class="sRow" id="dStake"><span class="sIco"><i class="ri-seedling-line"></i></span><span class="sTx"><span class="sLbl">Stake <b>SOL</b></span></span><span class="sChev"><i class="ri-arrow-right-s-line"></i></span></button>' : ''}
       ${c.id === 'ethereum' ? '<button class="sRow" id="dLido"><span class="sIco"><i class="ri-drop-line"></i></span><span class="sTx"><span class="sLbl">Stake with <b>Lido</b></span></span><span class="sChev"><i class="ri-arrow-right-s-line"></i></span></button>' : ''}
-      ${(c.kind === 'solana' || c.kind === 'solana-tw' || c.blockscout) ? '<button class="sRow" id="dNfts"><span class="sIco"><i class="ri-image-2-line"></i></span><span class="sTx"><span class="sLbl">Your <b>collectibles</b></span></span><span class="sChev"><i class="ri-arrow-right-s-line"></i></span></button>' : ''}
+      ${(c.kind === 'solana' || c.kind === 'solana-tw' || c.kind === 'solana-phantom' || c.blockscout) ? '<button class="sRow" id="dNfts"><span class="sIco"><i class="ri-image-2-line"></i></span><span class="sTx"><span class="sLbl">Your <b>collectibles</b></span></span><span class="sChev"><i class="ri-arrow-right-s-line"></i></span></button>' : ''}
       <button class="sRow" id="expBtn"><span class="sIco"><i class="ri-external-link-line"></i></span><span class="sTx"><span class="sLbl">View on <b>explorer</b></span></span><span class="sChev"><i class="ri-arrow-right-s-line"></i></span></button>
       ${keyTargetForChain(c) ? keyRowHTML('dKey') : ''}
     </div></div>
@@ -2474,7 +2506,7 @@ async function resolveNameFor(c: Chain, rawInput: string): Promise<NameResolutio
       return { address: addr, kind };
     } catch { return { error: `Could not resolve ${input} — the name service could not be reached. The send is blocked rather than guessed.` }; }
   }
-  if (c.kind !== 'solana' && c.kind !== 'solana-tw') return { error: 'SNS (.sol) names only work on Solana. Switch the network, or use the raw address.' };
+  if (c.kind !== 'solana' && c.kind !== 'solana-tw' && c.kind !== 'solana-phantom') return { error: 'SNS (.sol) names only work on Solana. Switch the network, or use the raw address.' };
   try {
     const key = snsDomainKey(input);
     const v = await solanaRpcCall('getAccountInfo', [key.toBase58(), { encoding: 'base64' }]);
@@ -2490,7 +2522,7 @@ async function resolveNameFor(c: Chain, rawInput: string): Promise<NameResolutio
 async function reverseNameFor(c: Chain, address: string): Promise<string | null> {
   try {
     if (c.kind === 'evm') { const n = await ensProvider().lookupAddress(address); return n || null; }
-    if (c.kind === 'solana' || c.kind === 'solana-tw') {
+    if (c.kind === 'solana' || c.kind === 'solana-tw' || c.kind === 'solana-phantom') {
       const wallet = new PublicKey(address);
       const fav = await solanaRpcCall('getAccountInfo', [snsFavouriteKey(wallet).toBase58(), { encoding: 'base64' }]);
       const favData = fav?.value?.data?.[0]; if (!favData) return null;
@@ -2518,7 +2550,7 @@ async function reverseNameFor(c: Chain, address: string): Promise<string | null>
 // Is this input already a syntactically valid raw address for the chain?
 function isRawAddressFor(c: Chain, input: string): boolean {
   const s = input.trim();
-  if (c.kind === 'solana' || c.kind === 'solana-tw') { try { new PublicKey(s); return true; } catch { return false; } }
+  if (c.kind === 'solana' || c.kind === 'solana-tw' || c.kind === 'solana-phantom') { try { new PublicKey(s); return true; } catch { return false; } }
   if (c.kind === 'tron') return isValidTronAddress(s);
   if (c.kind === 'bitcoin') return isValidUtxoAddress(c.id, s);
   if (c.kind === 'evm') return ethers.isAddress(s);
@@ -2538,7 +2570,7 @@ function riskReportHTML(rep: RiskReport, subject: string): string {
 }
 async function paintAddressRisk(el: HTMLElement | null, address: string, c: Chain) {
   if (!el) return;
-  if (c.kind !== 'evm' && c.kind !== 'solana' && c.kind !== 'solana-tw') { el.innerHTML = '<p class="small muted">Address risk check is not available for this network.</p>'; return; }
+  if (c.kind !== 'evm' && c.kind !== 'solana' && c.kind !== 'solana-tw' && c.kind !== 'solana-phantom') { el.innerHTML = '<p class="small muted">Address risk check is not available for this network.</p>'; return; }
   el.innerHTML = `<p class="small muted">${waveLoadHTML()} Checking this address with GoPlus…</p>`;
   const rep = await gpAddressRisk(address, c.kind === 'evm' ? String(c.evmId) : 'solana');
   if (!el.isConnected) return;
@@ -2630,7 +2662,7 @@ function openReceivePicker(current: Chain, tokenId?: string) {
   });
 }
 // Send drafts survive re-renders (errors, chain switching) per chain.
-export const SENDABLE_KINDS = new Set<ChainKind>(['evm', 'solana', 'solana-tw', 'tron', 'bitcoin']);
+export const SENDABLE_KINDS = new Set<ChainKind>(['evm', 'solana', 'solana-tw', 'solana-phantom', 'tron', 'bitcoin']);
 function hexToBytes(hex: string): Uint8Array { const h = hex.replace(/^0x/, ''); const out = new Uint8Array(h.length / 2); for (let i = 0; i < out.length; i++) out[i] = parseInt(h.slice(i * 2, i * 2 + 2), 16); return out; }
 function tronToHex(base58Addr: string): string { const raw = bs58.decode(base58Addr); return Array.from(raw.slice(0, 21)).map(b => b.toString(16).padStart(2, '0')).join(''); }
 function tronHexToBase58(hex: string): string {
@@ -2690,7 +2722,7 @@ function showSend(chainId: string, err = '', done = '') {
     <div style="height:16px"></div>
     <button class="assetPick" id="assetPick">${coinIcon(c)}<span><div class="apName">${esc(c.name)}</div><div class="apBal">Balance: ${b == null ? (balStateOf(c.id) === 'pending' ? 'Loading…' : 'Unavailable') : trimNum(b) + ' ' + esc(c.symbol)}</div></span><i class="ri-arrow-down-s-line"></i></button>
     <div style="height:14px"></div>
-    <div class="toPill"><div class="fld"><label>To</label><input id="toAddr" placeholder="${(c.kind === 'solana' || c.kind === 'solana-tw') ? 'Solana address or name.sol' : c.kind === 'tron' ? 'TRON address (starts with T)' : '0x address or name.eth'}" value="${esc(d.to)}" autocomplete="off" autocapitalize="none" spellcheck="false"></div><button class="pasteBtn" id="pasteBtn">Paste</button></div>
+    <div class="toPill"><div class="fld"><label>To</label><input id="toAddr" placeholder="${(c.kind === 'solana' || c.kind === 'solana-tw' || c.kind === 'solana-phantom') ? 'Solana address or name.sol' : c.kind === 'tron' ? 'TRON address (starts with T)' : '0x address or name.eth'}" value="${esc(d.to)}" autocomplete="off" autocapitalize="none" spellcheck="false"></div><button class="pasteBtn" id="pasteBtn">Paste</button></div>
     <div id="nameBox"></div>
     <div class="amtWrap" id="amtWrap"><span class="amtDisplay" id="amtDisplay"></span><span class="amtCursor"></span></div>
     <input id="amtHidden" inputmode="decimal" autocomplete="off" style="position:absolute;opacity:0;height:1px;width:1px;pointer-events:none" aria-label="Amount">
@@ -2809,7 +2841,7 @@ function showSend(chainId: string, err = '', done = '') {
       if ('error' in r) return showSend(chainId, r.error);
       to = r.address; nameLabel = rawTo.trim().toLowerCase();
     }
-    if (c.kind === 'solana' || c.kind === 'solana-tw') { try { new PublicKey(to); } catch { return showSend(chainId, 'That does not look like a valid Solana address.'); } }
+    if (c.kind === 'solana' || c.kind === 'solana-tw' || c.kind === 'solana-phantom') { try { new PublicKey(to); } catch { return showSend(chainId, 'That does not look like a valid Solana address.'); } }
     if (c.kind === 'tron' && !isValidTronAddress(to)) return showSend(chainId, 'That does not look like a valid TRON address.');
     if (c.kind === 'bitcoin' && !isValidUtxoAddress(c.id, to)) return showSend(chainId, `That does not look like a valid ${c.name} address. Check the network — a ${c.id === 'litecoin' ? 'Bitcoin' : 'Litecoin'} address cannot receive ${c.symbol}.`);
     if (c.evmId) {
@@ -2945,14 +2977,30 @@ async function fetchUtxoFeeRate(c: Chain): Promise<number> {
   const r = await fetch(`/api/utxo/${c.id}/fees`);
   if (!r.ok) throw new Error('Fee data unavailable — try again in a moment.');
   const j = await r.json(); const v = Number(j?.satVb);
-  if (!(v > 0)) throw new Error('Fee data unavailable — try again in a moment.');
+  // Deep audit 2026-11-22: sanity ceiling — a broken or hostile fee
+  // source must not be able to quote an absurd rate into the review
+  // screen (real-world BTC/LTC rates stay far below this).
+  if (!(v > 0) || v > 5000) throw new Error('Fee data unavailable — try again in a moment.');
   return v;
 }
-async function estimateFee(c: Chain): Promise<number | null> {
+async function estimateFee(c: Chain, toAddr = '', amtStr = ''): Promise<number | null> {
   try {
-    if (c.kind === 'solana' || c.kind === 'solana-tw') return 0.000005;
+    if (c.kind === 'solana' || c.kind === 'solana-tw' || c.kind === 'solana-phantom') return 0.000005;
     if (c.kind === 'tron') return 0; // covered by free daily bandwidth in the normal case
-    if (c.kind === 'bitcoin') { const [rate, utxos] = await Promise.all([fetchUtxoFeeRate(c), fetchUtxos(c).catch(() => [] as Utxo[])]); return estimateUtxoFeeSats(c.id, utxos.length, '', rate) / 1e8; }
+    if (c.kind === 'bitcoin') {
+      const [rate, utxos] = await Promise.all([fetchUtxoFeeRate(c), fetchUtxos(c).catch(() => [] as Utxo[])]);
+      // Deep audit 2026-11-22: when the amount + recipient are known
+      // (the review screen), run the REAL coin selection the signer
+      // will run — the old rough estimate capped inputs at 3 and
+      // could understate the fee ~3x on fragmented wallets. Fall back
+      // to the rough estimate when selection can't fund the send.
+      const sats = amtStr ? parseRawAmount(amtStr, 8) : null;
+      if (sats != null && sats > 0n && toAddr) {
+        const sel = selectCoins(c.id, utxos, toAddr, addressFor(c), Number(sats), rate);
+        if (sel) return sel.feeSats / 1e8;
+      }
+      return estimateUtxoFeeSats(c.id, utxos.length, toAddr, rate) / 1e8;
+    }
     const provider = new ethers.JsonRpcProvider(evmProviderUrl(c), c.evmId);
     const fd = await provider.getFeeData(); const gp = fd.gasPrice ?? 0n; return Number(ethers.formatEther(gp * 21000n));
   } catch { return null; }
@@ -2985,7 +3033,7 @@ function showSendConfirm(c: Chain, to: string, amtStr: string, err = '', poisonW
       if (ac) { const ch = chosenFees(feeState, feeInfo); ac.textContent = b == null ? (balStateOf(c.id) === 'pending' ? 'Loading…' : 'Unavailable') : ch ? `${trimNum(b - amt - Number(ethers.formatEther(ch.effPrice * GAS_LIMIT)), 6)} ${c.symbol}` : `${(b - amt).toFixed(6)} ${c.symbol} (before fee)`; }
       return;
     }
-    estimateFee(c).then(fee => { if (fc && fc.isConnected) fc.textContent = fee == null ? 'Unavailable — shown at signing' : `~${fee} ${c.symbol}`; if (ac && ac.isConnected) ac.textContent = b == null ? (balStateOf(c.id) === 'pending' ? 'Loading…' : 'Unavailable') : fee == null ? `${(b - amt).toFixed(6)} ${c.symbol} (before fee)` : `${(b - amt - fee).toFixed(6)} ${c.symbol}`; });
+    estimateFee(c, to, amtStr).then(fee => { if (fc && fc.isConnected) fc.textContent = fee == null ? 'Unavailable — shown at signing' : `~${fee} ${c.symbol}`; if (ac && ac.isConnected) ac.textContent = b == null ? (balStateOf(c.id) === 'pending' ? 'Loading…' : 'Unavailable') : fee == null ? `${(b - amt).toFixed(6)} ${c.symbol} (before fee)` : `${(b - amt - fee).toFixed(6)} ${c.symbol}`; });
   };
   if (c.kind === 'evm') bindGasBox(c, () => GAS_LIMIT, updateFeeUI);
   updateFeeUI();
@@ -3005,7 +3053,7 @@ function showSendConfirm(c: Chain, to: string, amtStr: string, err = '', poisonW
     if (bNow != null) {
       let feeNow: number | null = null;
       if (c.kind === 'evm') { const ch = chosenFees(feeState, feeInfo); feeNow = ch ? Number(ethers.formatEther(ch.effPrice * GAS_LIMIT)) : null; }
-      else feeNow = await estimateFee(c);
+      else feeNow = await estimateFee(c, to, amtStr);
       if (feeNow != null && amt + feeNow > bNow) { showSendConfirm(c, to, amtStr, `Amount plus the network fee (~${trimNum(feeNow, 8)} ${c.symbol}) exceeds your balance. Go back and reduce the amount — the MAX shortcut leaves room for the fee.`, poisonWarn, nameLabel); return; }
     }
     const btn = $('#sendBtn') as HTMLButtonElement; btnBusy(btn, 'Signing & broadcasting…');
@@ -3083,6 +3131,16 @@ async function doSend(c: Chain, to: string, amtStr: string, feeOverrides: Record
     const res = await fetch('https://api.trongrid.io/wallet/createtransaction', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ owner_address: tronToHex(derived2.tronAddress), to_address: tronToHex(to), amount: sun, visible: false }) });
     const tx = await res.json();
     if (!tx || !tx.txID || !tx.raw_data_hex) throw new Error('TronGrid could not build this transaction — the account may not be activated on TRON yet.');
+    // Deep audit 2026-11-22 (P1): TRON was the one sendable family
+    // still blind-signing a remotely built transaction — TronGrid
+    // builds it and the wallet signed its hash unchecked, so a
+    // compromised/MITM'd response could substitute any recipient or
+    // amount under the reviewed confirm screen. Verify before
+    // signing, exactly like the aggregator checks (H-1): (1) the
+    // txID must be the sha256 of the raw data we are about to sign;
+    // (2) the single TransferContract inside must name THIS wallet
+    // as owner and the reviewed recipient + amount as its payload.
+    if (!verifyTronTransferTx(tx, tronToHex(derived2.tronAddress), tronToHex(to), sun)) throw new Error('The transaction TronGrid built does not match the reviewed recipient and amount — refusing to sign.');
     const sig = secp256k1.sign(hexToBytes(tx.txID), hexToBytes(derived2.tronPrivateKeyHex));
     tx.signature = [sig.r.toString(16).padStart(64, '0') + sig.s.toString(16).padStart(64, '0') + (sig.recovery + 27).toString(16).padStart(2, '0')];
     const bc = await fetch('https://api.trongrid.io/wallet/broadcasttransaction', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(tx) });
@@ -3090,8 +3148,8 @@ async function doSend(c: Chain, to: string, amtStr: string, feeOverrides: Record
     if (bj?.result !== true) throw new Error('Broadcast rejected by the network.');
     return tx.txID as string;
   }
-  if (c.kind === 'solana' || c.kind === 'solana-tw') {
-    const kp: Keypair = c.kind === 'solana-tw' ? Keypair.fromSeed(derived2!.solTWSeed32) : meta?.kind === 'privateKey' ? importedSolKp! : Keypair.fromSeed(derived2!.solSeed32);
+  if (c.kind === 'solana' || c.kind === 'solana-tw' || c.kind === 'solana-phantom') {
+    const kp: Keypair = c.kind === 'solana-tw' ? Keypair.fromSeed(derived2!.solTWSeed32) : c.kind === 'solana-phantom' ? Keypair.fromSeed(derived2!.solPhantomSeed32) : meta?.kind === 'privateKey' ? importedSolKp! : Keypair.fromSeed(derived2!.solSeed32);
     const conn = new Connection(solanaRpcUrl(), 'confirmed');
     const lamports = parseRawAmount(amtStr, 9);
     if (lamports == null) throw new Error('Invalid amount.');
@@ -3161,7 +3219,7 @@ function bindReceipt(hash: string, explorerTx: string, done: (el: HTMLElement) =
 // challenge). Throws when every source failed, so callers can render
 // the honest UNAVAILABLE state (never a fake empty).
 async function fetchChainActivity(c: Chain, addr: string, limit = 15): Promise<ActivityRow[]> {
-  if (c.kind === 'solana' || c.kind === 'solana-tw') { const conn = new Connection(solanaRpcUrl()); const sigs = await conn.getSignaturesForAddress(new PublicKey(addr), { limit }); return sigs.map(s => ({ hash: s.signature, label: s.err ? 'Failed transaction' : 'Transaction', sub: s.blockTime ? new Date(s.blockTime * 1000).toLocaleString() : '', ts: s.blockTime ? s.blockTime * 1000 : 0, dir: 'other' as ActDir, sym: 'SOL', st: s.err ? 'failed' as const : undefined })); }
+  if (c.kind === 'solana' || c.kind === 'solana-tw' || c.kind === 'solana-phantom') { const conn = new Connection(solanaRpcUrl()); const sigs = await conn.getSignaturesForAddress(new PublicKey(addr), { limit }); return sigs.map(s => ({ hash: s.signature, label: s.err ? 'Failed transaction' : 'Transaction', sub: s.blockTime ? new Date(s.blockTime * 1000).toLocaleString() : '', ts: s.blockTime ? s.blockTime * 1000 : 0, dir: 'other' as ActDir, sym: 'SOL', st: s.err ? 'failed' as const : undefined })); }
   if (c.kind === 'bitcoin') { const r = await fetch(`/api/utxo/${c.id}/txs/${addr}`); const j = await r.json(); return (Array.isArray(j) ? j : []).slice(0, limit).map((t: any) => {
     // Direction/amount/counterparty derive from the tx's own vin/vout —
     // the passthrough returns the full esplora transaction.
@@ -3514,6 +3572,7 @@ function showSettings(err = '', msg = '') {
     <button class="sRow" id="lockBtn" type="button">${ico('lock-line')}<span class="sTx"><span class="sLbl">Lock now</span><div class="sSub">Require password to reopen</div></span></button>
     <div class="sRow">${ico('time-line')}<span class="sTx"><span class="sLbl">Auto-lock</span><div class="sSub">Locks after inactivity; keys are wiped from memory</div></span><span class="sVal">${autoLockMin()} min</span></div>
     <div class="sBlock"><div class="seg" id="alSeg"><button data-m="1">1 min</button><button data-m="5">5 min</button><button data-m="15">15 min</button></div></div>
+    <button class="sRow" id="chgPwBtn" type="button">${ico('lock-password-line')}<span class="sTx"><span class="sLbl">Change password</span><div class="sSub">Re-encrypts the vault with a new password</div></span>${chev}</button>
     <button class="sRow" id="pkBtn" type="button">${ico('fingerprint-line')}<span class="sTx"><span class="sLbl">Face ID / passkey unlock</span><div class="sSub" id="pkDesc">${config.passkey ? 'Enabled — your password still works as a fallback.' : 'Checking support…'}</div></span><span class="sVal">${config.passkey ? 'On' : 'Off'}</span></button>
     ${meta.kind === 'mnemonic' ? `<button class="sRow" id="revealBtn" type="button">${ico('eye-line')}<span class="sTx"><span class="sLbl">Reveal recovery phrase</span><div class="sSub">Opens the secure reveal — password &amp; warning required</div></span>${chev}</button>` : `<div class="sRow">${ico('key-2-line')}<span class="sTx"><span class="sLbl">Imported account</span><div class="sSub">Private-key import — no recovery phrase</div></span><span class="sVal">${meta.chain === 'solana' ? 'Solana' : 'EVM'}</span></div>`}
     <button class="sRow" id="keysBtn" type="button">${ico('key-2-line')}<span class="sTx"><span class="sLbl">Private keys &amp; recovery phrase</span><div class="sSub">Per wallet, per chain — password and warning required</div></span>${chev}</button>
@@ -3569,6 +3628,45 @@ function showSettings(err = '', msg = '') {
   // password, warning + "I understand", blur, 45s wipe), the same door
   // as "Private keys & recovery phrase".
   const rb = $('#revealBtn'); if (rb) rb.onclick = () => go({ route: 'keys' }, rb);
+  // Deep audit 2026-11-22: there was NO way to change the wallet
+  // password short of wipe + re-import. Safe order of operations:
+  // prove the current password by decrypting the stored blob, build
+  // the new blob, write it, and only then swap the in-memory
+  // password — a failure anywhere leaves the old password working.
+  const cp = $('#chgPwBtn'); if (cp) cp.onclick = () => {
+    const close = openSheet('Change password', `<div style="padding:2px 2px 0">
+      <div class="fld"><label>Current password</label><input type="password" id="cpCur" placeholder="Enter current password" autocomplete="current-password"></div>
+      <div class="fld" style="margin-top:10px"><label>New password</label><input type="password" id="cpNew" placeholder="At least ${MIN_PASSWORD_LENGTH} characters" autocomplete="new-password"></div>
+      <div class="fld" style="margin-top:10px"><label>Confirm new password</label><input type="password" id="cpNew2" placeholder="Repeat new password" autocomplete="new-password"></div>
+      <div class="err" id="cpErr" style="display:none"></div>
+      <p class="small muted" style="margin-top:10px">The vault is re-encrypted with the new password (AES-GCM, PBKDF2 600,000 rounds). Encrypted backups you exported earlier still open with the OLD password. Passkey unlock wraps a copy of your password, so a password change turns it off — re-enable it afterwards.</p>
+      <div style="height:12px"></div><button class="ctaWide" id="cpGo">Change password</button></div>`);
+    ($('#cpGo') as HTMLElement).onclick = async () => {
+      const er = $('#cpErr'); const fail = (t: string) => { if (er) { er.style.display = 'block'; er.textContent = t; } };
+      const cur = ($('#cpCur') as HTMLInputElement).value;
+      const nw = ($('#cpNew') as HTMLInputElement).value;
+      const nw2 = ($('#cpNew2') as HTMLInputElement).value;
+      if (nw.length < MIN_PASSWORD_LENGTH) return fail(`New password needs at least ${MIN_PASSWORD_LENGTH} characters.`);
+      if (nw !== nw2) return fail('The new passwords do not match.');
+      if (nw === cur) return fail('The new password is the same as the current one.');
+      if (!vaultPayload || !appPassword) return fail('Wallet is locked.');
+      const btn = $('#cpGo') as HTMLButtonElement; btn.disabled = true;
+      let stage = 'verify';
+      try {
+        const raw = localStorage.getItem(VAULT_KEY); if (!raw) throw new Error('No vault on this device.');
+        await decryptVault(JSON.parse(raw), cur);
+        stage = 'save';
+        const blob = await encryptVault(packVaultPayload(vaultPayload), nw);
+        try { localStorage.setItem(VAULT_KEY, JSON.stringify(blob)); }
+        catch { vaultSaveAlert(); throw new Error('storage'); }
+        appPassword = nw;
+        const hadPasskey = !!config.passkey;
+        if (hadPasskey) { config.passkey = null; saveConfig(); }
+        close();
+        showSettings('', 'Password changed. Your vault now opens with the new password.' + (hadPasskey ? ' Passkey unlock was turned off (it wrapped the old password) — re-enable it in Security.' : ''));
+      } catch { fail(stage === 'save' ? 'Could not save the re-encrypted vault — storage is full or blocked. Your password was NOT changed.' : 'Current password is incorrect — nothing was changed.'); btn.disabled = false; }
+    };
+  };
 }
 
 
@@ -3638,6 +3736,7 @@ function keyTargetMetasFor(w: WalletEntry, acct: number): KeyTargetMeta[] {
     ...evmKeyMetaRows('evm', d.evmAddress),
     { id: 'solana', label: 'Solana', sub: 'Private key · base58 (Phantom format)', address: d.solAddress },
     { id: 'solana-tw', label: 'Solana · Trust Wallet path', sub: 'Private key · base58 (Phantom format)', address: d.solTWAddress },
+    { id: 'solana-phantom', label: 'Solana · Phantom path', sub: 'Private key · base58 (Phantom format)', address: d.solPhantomAddress },
     { id: 'bitcoin', label: 'Bitcoin', sub: 'Private key · WIF', address: d.btcAddress },
     { id: 'litecoin', label: 'Litecoin', sub: 'Private key · WIF', address: d.ltcAddress },
     { id: 'tron', label: 'TRON', sub: 'Private key · hex', address: d.tronAddress },
@@ -3663,6 +3762,7 @@ function keyValueFor(w: WalletEntry, acct: number, targetId: string): string | n
   switch (targetId) {
     case 'solana': return solanaSecretKeyBase58(d.solSeed32);
     case 'solana-tw': return solanaSecretKeyBase58(d.solTWSeed32);
+    case 'solana-phantom': return solanaSecretKeyBase58(d.solPhantomSeed32);
     case 'bitcoin': return btcWifFromPrivateKey(base16.decode(d.btcPrivateKeyHex));
     case 'litecoin': return utxoWifFromPrivateKey(base16.decode(d.ltcPrivateKeyHex), 0xb0);
     case 'tron': return d.tronPrivateKeyHex;
@@ -3799,6 +3899,7 @@ function keyTargetForChain(c: Chain): { id: string; title: string } | null {
     case 'evm': return { id: 'evm-' + c.id, title: `${c.name} — EVM private key` };
     case 'solana': return { id: 'solana', title: 'Solana private key' };
     case 'solana-tw': return { id: 'solana-tw', title: 'Solana (Trust Wallet) private key' };
+    case 'solana-phantom': return { id: 'solana-phantom', title: 'Solana (Phantom) private key' };
     case 'bitcoin': return c.id === 'litecoin' ? { id: 'litecoin', title: 'Litecoin private key' } : { id: 'bitcoin', title: 'Bitcoin private key' };
     case 'tron': return { id: 'tron', title: 'TRON private key' };
     case 'xrp': return { id: 'xrp', title: 'XRP private key' };
@@ -3825,7 +3926,7 @@ function netRowHTML(c: Chain, en: Set<string>): string {
 function showNetworks(err = '') {
   const en = enabledSet();
   const q = netQuery.trim().toLowerCase();
-  const all = CHAINS.filter(c => c.id !== 'solana-tw');
+  const all = CHAINS.filter(c => c.id !== 'solana-tw' && c.id !== 'solana-phantom');
   const filtered = all.filter(c => !q || c.name.toLowerCase().includes(q) || c.symbol.toLowerCase().includes(q) || String(c.evmId || '').includes(q));
   const enabledList = all.filter(c => en.has(c.id));
   setView(`<main><button class="backBtn" id="bk" aria-label="Back"><i class="ri-arrow-left-s-line"></i></button><div class="largeTitle" style="padding-top:2px">Networks</div>
@@ -3990,7 +4091,7 @@ function showToken(tokenId: string) {
   </div></div>` : ''}
   <div class="gGroup"><div class="gHead">Token details</div><div class="gCard flushHair">
     <div class="sRow stat"><span class="sTx"><span class="sLbl">Network</span></span><span class="sVal strong">${esc(c.name)}</span></div>
-    <div class="sRow stat"><span class="sTx"><span class="sLbl">${c.kind === 'solana' || c.kind === 'solana-tw' ? 'Mint address' : 'Contract'}</span><div class="sSub">Tap the chip to copy</div></span><button class="monoChip" id="tkContract">${esc(shortAddr(t.contract))}</button></div>
+    <div class="sRow stat"><span class="sTx"><span class="sLbl">${c.kind === 'solana' || c.kind === 'solana-tw' || c.kind === 'solana-phantom' ? 'Mint address' : 'Contract'}</span><div class="sSub">Tap the chip to copy</div></span><button class="monoChip" id="tkContract">${esc(shortAddr(t.contract))}</button></div>
     <div class="sRow stat"><span class="sTx"><span class="sLbl">Decimals</span></span><span class="sVal strong">${t.decimals}</span></div>
     <div class="sRow stat"><span class="sTx"><span class="sLbl">Your ${esc(c.name)} address</span><div class="sSub">Tap the chip to copy</div></span><button class="monoChip" id="tkAddr">${esc(shortAddr(addr))}</button></div>
     <div class="sRow stat"><span class="sTx"><span class="sLbl">${t.builtin ? 'Hide token' : 'Remove token'}</span><div class="sSub">${t.builtin ? 'Built-in token — it can be hidden, not deleted' : 'Removes this custom token from this device'}</div></span><button class="pillBtn danger" id="tkRemove">${t.builtin ? 'Hide' : 'Remove'}</button></div>
@@ -4105,7 +4206,7 @@ function paintTokenValues() {
 // 2026-11-18), but the mint account itself carries the mint and freeze
 // authorities, which is what a Solana risk check actually needs.
 async function tokenRiskReport(contract: string, c: Chain): Promise<RiskReport> {
-  if (c.kind === 'solana' || c.kind === 'solana-tw') {
+  if (c.kind === 'solana' || c.kind === 'solana-tw' || c.kind === 'solana-phantom') {
     if (!contract || contract === 'native') return { status: 'unavailable', warnings: [], notes: [], reason: 'This is the native asset — there is no token mint to check.' };
     try {
       const info = await solanaRpcCall('getAccountInfo', [contract, { encoding: 'base64' }]);
@@ -4154,7 +4255,7 @@ function decodeErc20String(hex: string): string {
   } catch { return ''; }
 }
 async function fetchTokenMeta(c: Chain, contract: string): Promise<{ name: string; symbol: string; decimals: number } | null> {
-  if (c.kind === 'solana' || c.kind === 'solana-tw') {
+  if (c.kind === 'solana' || c.kind === 'solana-tw' || c.kind === 'solana-phantom') {
     const info = await solanaRpcCall('getAccountInfo', [contract, { encoding: 'jsonParsed' }]);
     const parsed = info?.value?.data?.parsed?.info;
     if (!parsed || typeof parsed.decimals !== 'number') return null;
@@ -4235,7 +4336,7 @@ function popListHTML(q: string): string {
   return `<div class="iosList">${list.map(t => t.builtin ? popTokenRowHTML(t) : popCatRowHTML(t)).join('')}</div>`;
 }
 function showAddToken(err = '', stage?: { c: Chain; contract: string; meta: { name: string; symbol: string; decimals: number } }) {
-  const candidates = visibleChains().filter(c => c.kind === 'evm' || c.kind === 'solana' || c.kind === 'solana-tw');
+  const candidates = visibleChains().filter(c => c.kind === 'evm' || c.kind === 'solana' || c.kind === 'solana-tw' || c.kind === 'solana-phantom');
   setView(`<main><button class="backBtn" id="bk" aria-label="Back"><i class="ri-arrow-left-s-line"></i></button><div class="largeTitle" style="padding-top:2px">Add token</div>
   <div style="padding:0 16px">${err ? `<div class="err">${esc(err)}</div><div style="height:10px"></div>` : ''}
   ${stage ? `<div class="setPanel" style="margin:0 0 12px"><div class="setH">Found on ${esc(stage.c.name)}</div>
@@ -4354,7 +4455,7 @@ function showAddToken(err = '', stage?: { c: Chain; contract: string; meta: { na
     const c = findChain(($('#tkChain') as unknown as HTMLSelectElement).value); const contract = ($('#tkContractIn') as unknown as HTMLInputElement).value.trim();
     if (!c) return;
     if (c.kind === 'evm' && !ethers.isAddress(contract)) { showAddToken('That is not a valid contract address for ' + c.name + '.'); return; }
-    if ((c.kind === 'solana' || c.kind === 'solana-tw')) { try { new PublicKey(contract); } catch { showAddToken('That is not a valid Solana mint address.'); return; } }
+    if ((c.kind === 'solana' || c.kind === 'solana-tw' || c.kind === 'solana-phantom')) { try { new PublicKey(contract); } catch { showAddToken('That is not a valid Solana mint address.'); return; } }
     const btn = $('#tkFetch') as HTMLButtonElement; btn.disabled = true; btn.textContent = 'Reading from the chain…';
     try { const meta = await fetchTokenMeta(c, contract); if (!meta) { showAddToken('That contract did not answer like a token (no symbol/decimals). Nothing was added.'); return; } showAddToken('', { c, contract, meta }); }
     catch { showAddToken('Could not read that contract from the network. Nothing was added.'); }
@@ -4369,7 +4470,7 @@ function showTokenSend(tokenId: string, err = '') {
   ${err ? `<div style="height:12px"></div><div class="err">${esc(err)}</div>` : ''}<div style="height:16px"></div>
   <button class="assetPick" id="tkAssetPick">${iconHTML(tokenIconUrl(t), t.symbol, t.name)}<span><div class="apName">${esc(t.name)}</div><div class="apBal">Balance: ${tb == null ? (tokStateOf(t.id) === 'pending' ? 'Loading…' : 'Unavailable') : trimNum(tb) + ' ' + esc(t.symbol)}</div></span><i class="ri-arrow-down-s-line"></i></button>
   <div style="height:14px"></div>
-  <div class="toPill"><div class="fld"><label>To</label><input id="tkTo" placeholder="${c.kind === 'tron' ? 'TRON address' : (c.kind === 'solana' || c.kind === 'solana-tw') ? 'Solana address or name.sol' : '0x address or name.eth'}" autocomplete="off" autocapitalize="none" spellcheck="false"></div><button class="pasteBtn" id="tkPaste" type="button">Paste</button></div>
+  <div class="toPill"><div class="fld"><label>To</label><input id="tkTo" placeholder="${c.kind === 'tron' ? 'TRON address' : (c.kind === 'solana' || c.kind === 'solana-tw' || c.kind === 'solana-phantom') ? 'Solana address or name.sol' : '0x address or name.eth'}" autocomplete="off" autocapitalize="none" spellcheck="false"></div><button class="pasteBtn" id="tkPaste" type="button">Paste</button></div>
   <div class="field" style="margin-top:14px"><label>Amount (${esc(t.symbol)})</label><div class="box"><input id="tkAmt" inputmode="decimal" placeholder="0.0" autocomplete="off"></div></div>
   <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;min-height:26px"><span class="small muted" id="tkFiat"></span><button class="pillBtn" id="tkMax" type="button">MAX</button></div>
   <div class="feeLine"><i class="ri-information-line"></i><span>Network fee is paid in ${esc(c.symbol)} — the exact fee and speed are set on the review step.</span></div>
@@ -4408,7 +4509,7 @@ function showTokenSend(tokenId: string, err = '') {
       const mixed = to !== to.toLowerCase() && to !== to.toUpperCase();
       if (mixed && !nameLabel) { try { ethers.getAddress(to); } catch { return showTokenSend(tokenId, 'Address checksum (EIP-55) failed — send blocked.'); } }
     }
-    if (c.kind === 'solana' || c.kind === 'solana-tw') { try { new PublicKey(to); } catch { return showTokenSend(tokenId, 'That does not look like a valid Solana address.'); } }
+    if (c.kind === 'solana' || c.kind === 'solana-tw' || c.kind === 'solana-phantom') { try { new PublicKey(to); } catch { return showTokenSend(tokenId, 'That does not look like a valid Solana address.'); } }
     // Audit M-9: token sends get the SAME poisoning check as native sends.
     const poisonWarn = poisonWarning(to);
     feeState = freshFeeState();
@@ -4477,8 +4578,8 @@ async function doTokenSend(t: TokenDef, to: string, amtStr: string, feeOverrides
     const tx = Object.keys(feeOverrides).length ? await contract.transfer(to, ethers.parseUnits(amtStr, t.decimals), feeOverrides) : await contract.transfer(to, ethers.parseUnits(amtStr, t.decimals));
     return tx.hash;
   }
-  if (c.kind === 'solana' || c.kind === 'solana-tw') {
-    const kp: Keypair = c.kind === 'solana-tw' ? Keypair.fromSeed(derived2!.solTWSeed32) : meta?.kind === 'privateKey' ? importedSolKp! : Keypair.fromSeed(derived2!.solSeed32);
+  if (c.kind === 'solana' || c.kind === 'solana-tw' || c.kind === 'solana-phantom') {
+    const kp: Keypair = c.kind === 'solana-tw' ? Keypair.fromSeed(derived2!.solTWSeed32) : c.kind === 'solana-phantom' ? Keypair.fromSeed(derived2!.solPhantomSeed32) : meta?.kind === 'privateKey' ? importedSolKp! : Keypair.fromSeed(derived2!.solSeed32);
     const conn = new Connection(solanaRpcUrl(), 'confirmed');
     const mint = new PublicKey(t.contract); const owner = new PublicKey(to);
     const fromAta = getAssociatedTokenAddressSync(mint, kp.publicKey);
@@ -4797,6 +4898,7 @@ function solanaKeypairFor(kind: ChainKind): Keypair | null {
   if (meta?.kind === 'privateKey') return meta.chain === 'solana' ? importedSolKp : null;
   if (!derived2) return null;
   if (kind === 'solana-tw') return Keypair.fromSeed(derived2.solTWSeed32);
+  if (kind === 'solana-phantom') return Keypair.fromSeed(derived2.solPhantomSeed32);
   if (kind === 'solana') return Keypair.fromSeed(derived2.solSeed32);
   return null;
 }
@@ -4945,7 +5047,7 @@ function ensureCustomToken(r: { c: Chain; contract: string; meta: { name: string
 }
 
 interface SwapAsset extends PickerAsset { img: string }
-function chainSwappable(c: Chain): boolean { return c.kind === 'evm' || c.kind === 'solana' || c.kind === 'solana-tw'; }
+function chainSwappable(c: Chain): boolean { return c.kind === 'evm' || c.kind === 'solana' || c.kind === 'solana-tw' || c.kind === 'solana-phantom'; }
 function withAssetImg(a: PickerAsset): SwapAsset { return { ...a, img: a.contract === 'native' ? chainIconUrl(findChain(a.chainId)!) : tokenIconUrl(findToken(a.tokenId!)!) }; }
 function swapAssets(): SwapAsset[] {
   // Set construction lives in lib/pickerassets (unit-tested): every
@@ -5010,7 +5112,7 @@ function swapAssetBalance(a: SwapAsset): number | null {
   if (a.tokenId) { const v = tokenBalances.get(a.tokenId); return v === undefined ? null : v; }
   return null;
 }
-function isSolAsset(a: SwapAsset): boolean { const c = findChain(a.chainId); return !!c && (c.kind === 'solana' || c.kind === 'solana-tw'); }
+function isSolAsset(a: SwapAsset): boolean { const c = findChain(a.chainId); return !!c && (c.kind === 'solana' || c.kind === 'solana-tw' || c.kind === 'solana-phantom'); }
 let swapFromKey = ''; let swapToKey = ''; let swapAmount = ''; let swapSlippageBps = 50;
 // Addition 8: slippage control state. Custom mode is explicit (a custom
 // value may coincide with a preset), and the custom text persists for
@@ -5246,7 +5348,7 @@ function showSwap() {
     const b = swapAssetBalance(a); const p = swapAssetPrice(a); const st = swapAssetState(a);
     const isSel = a.key === (side === 'from' ? swapFromKey : swapToKey);
     const isOther = a.key === (side === 'from' ? swapToKey : swapFromKey);
-    const reason = !assetSwappable(a) ? (c && c.kind !== 'evm' && c.kind !== 'solana' && c.kind !== 'solana-tw' ? 'Receive-only network' : 'Swaps not supported on this network') : '';
+    const reason = !assetSwappable(a) ? (c && c.kind !== 'evm' && c.kind !== 'solana' && c.kind !== 'solana-tw' && c.kind !== 'solana-phantom' ? 'Receive-only network' : 'Swaps not supported on this network') : '';
     return `${iconHTML(a.img, a.symbol, a.name)}
       <span class="shTx"><span class="shName">${esc(a.name)} <span class="aSym">${esc(a.symbol)}</span></span><span class="shNet">${esc(c?.name || '')}${reason ? ' · ' + esc(reason) : ''}${isOther ? ' · On the other side — tap to swap sides' : ''}</span></span>
       <span class="shRight">${b != null ? `<span class="shBal">${trimNum(b)} ${esc(a.symbol)}</span><span class="shUsd">${p != null ? fmtUsd(b * p) : ''}</span>` : `<span class="shUsd">${st === 'pending' ? 'Loading…' : ''}</span>`}</span>
@@ -6006,7 +6108,7 @@ async function loadAllNfts(): Promise<void> {
   // Chains load CONCURRENTLY: one slow indexer must not stall the rest
   // (the Explore count on Home waits on this via the background warm).
   const per = await Promise.all(visibleChains().map(async (c): Promise<{ items: NftItem[]; note?: string }> => {
-    if (c.kind === 'solana' || c.kind === 'solana-tw') {
+    if (c.kind === 'solana' || c.kind === 'solana-tw' || c.kind === 'solana-phantom') {
       try { const items = await fetchSolanaNfts(c); return solNftFoundCount > 60 ? { items, note: `${c.name}: ${solNftFoundCount} NFT token accounts found — showing the first 60.` } : { items }; } catch { return { items: [], note: `${c.name}: NFT read failed — pull to reopen this screen to retry.` }; }
     }
     if (c.kind === 'evm') {
@@ -6267,7 +6369,7 @@ function showDiscover() {
   const openDapp = (d: typeof DAPPS[number]) => {
     let host = d.url; try { host = new URL(d.url).host; } catch { /* keep raw */ }
     const close = openSheet(d.name, `
-      <span class="coinIc dappSheetIc"><img class="coinImg" src="${d.logo}" alt=""><span class="coinLetter">${esc(d.name.slice(0, 2).toUpperCase())}</span></span>
+      <span class="coinIc dappSheetIc"><img class="coinImg" src="${esc(d.logo)}" alt=""><span class="coinLetter">${esc(d.name.slice(0, 2).toUpperCase())}</span></span>
       <p class="noteP" style="font-size:14px;color:var(--hi)">${esc(d.blurb)}</p>
       <div class="sumRow"><span class="sl">Category</span><span class="sv">${esc(d.cat)}</span></div>
       <div class="sumRow"><span class="sl">Networks</span><span class="sv">${esc(d.chains.join(' · '))}</span></div>
@@ -6277,13 +6379,13 @@ function showDiscover() {
     const ob = document.getElementById('dappOpen');
     if (ob) ob.onclick = () => { if (!/^https:\/\//i.test(d.url)) return; close(); window.open(d.url, '_blank'); };
   };
-  const dappCard = (d: typeof DAPPS[number]) => `<button class="dappRow" data-dapp="${esc(d.name)}"><span class="coinIc"><img class="coinImg" src="${d.logo}" alt=""><span class="coinLetter">${esc(d.name.slice(0, 2).toUpperCase())}</span></span><span style="flex:1;min-width:0"><span class="dn">${esc(d.name)}</span><span class="db" style="display:block">${esc(d.blurb)}</span><span class="catChip">${esc(d.cat)}</span> <span class="db" style="display:inline">${d.chains.join(' · ')}</span></span><span class="arrowChip"><i class="ri-arrow-right-up-line"></i></span></button>`;
+  const dappCard = (d: typeof DAPPS[number]) => `<button class="dappRow" data-dapp="${esc(d.name)}"><span class="coinIc"><img class="coinImg" src="${esc(d.logo)}" alt=""><span class="coinLetter">${esc(d.name.slice(0, 2).toUpperCase())}</span></span><span style="flex:1;min-width:0"><span class="dn">${esc(d.name)}</span><span class="db" style="display:block">${esc(d.blurb)}</span><span class="catChip">${esc(d.cat)}</span> <span class="db" style="display:inline">${esc(d.chains.join(' · '))}</span></span><span class="arrowChip"><i class="ri-arrow-right-up-line"></i></span></button>`;
   setView(`<main><button class="backBtn" id="bk" aria-label="Back"><i class="ri-arrow-left-s-line"></i></button>
   <div class="nftTitle">Discover</div>
   <p class="pageSub">Well-known Web3 apps, official domains only. Tap one to check its domain before opening — in-app signing arrives through WalletConnect.</p>
   <div class="searchField"><i class="ri-search-line"></i><input id="dappQ" type="text" placeholder="Search dApps or categories" value="${esc(discoverQuery)}" autocomplete="off"><button class="clr" id="dappClr" aria-label="Clear search"><i class="ri-close-line"></i></button></div>
   <div class="chipRail" id="dappCats">${cats.map(c => `<button class="chipPick ${discoverCat === c ? 'on' : ''}" data-cat="${esc(c)}" type="button">${esc(c)}</button>`).join('')}</div>
-  <div id="dappFeat"><div class="nftGroupH" style="padding-top:10px">Featured</div><div class="featRow">${featured.map(d => `<button class="featCard" data-dapp="${esc(d.name)}"><span class="coinIc"><img class="coinImg" src="${d.logo}" alt=""><span class="coinLetter">${esc(d.name.slice(0, 2).toUpperCase())}</span></span><span class="fn">${esc(d.name)}</span><span class="catChip">${esc(d.cat)}</span></button>`).join('')}</div></div>
+  <div id="dappFeat"><div class="nftGroupH" style="padding-top:10px">Featured</div><div class="featRow">${featured.map(d => `<button class="featCard" data-dapp="${esc(d.name)}"><span class="coinIc"><img class="coinImg" src="${esc(d.logo)}" alt=""><span class="coinLetter">${esc(d.name.slice(0, 2).toUpperCase())}</span></span><span class="fn">${esc(d.name)}</span><span class="catChip">${esc(d.cat)}</span></button>`).join('')}</div></div>
   <div class="nftGroupH">All dApps</div>
   <div id="dappList" style="margin-top:10px"></div></main>`);
   ($('#bk') as HTMLElement).onclick = () => goBack({ route: 'wallet' });
@@ -7058,7 +7160,7 @@ function bncCardHTML(e: PolyEvent, m: PolyMarket): string {
   const p = m.prices[0] ?? 0;
   const p1 = m.prices[1] ?? (1 - p);
   const letter = (m.question || e.title || '?').trim().charAt(0).toUpperCase();
-  const badge = `${esc(letter)}${e.image ? `<img class="coinImg evcBadgeImg" src="${esc(e.image)}" alt="">` : ''}`;
+  const badge = `${esc(letter)}${e.image && isSafeMediaUrl(e.image) ? `<img class="coinImg evcBadgeImg" src="${esc(e.image)}" alt="">` : ''}`;
   return `<div class="polyCard evcCard strokeLit" data-polym="${esc(m.conditionId)}" role="button" tabindex="0">
     <div class="evcHead"><span class="evcBadge">${badge}</span><h3 class="evcTitle">${esc(m.question)}</h3></div>
     <div class="mmcBets"><button class="mmcOrb mmcInteractive strokeLit" data-poly-go="${esc(m.conditionId)}:0"><span class="mmcSlot mmcOrbTilt">${MMC_TREND_UP}</span><span class="mmcLbl">${esc(m.outcomes[0] || 'Yes')} <span data-poly-cents="${esc(m.tokenIds[0] || '')}">${polyCents(p)}</span></span></button><button class="mmcOrb mmcInteractive mmcMuted strokeLit" data-poly-go="${esc(m.conditionId)}:1"><span class="mmcSlot mmcFlat">${MMC_TREND_DOWN}</span><span class="mmcLbl">${esc(m.outcomes[1] || 'No')} <span data-poly-cents="${esc(m.tokenIds[1] || '')}">${polyCents(p1)}</span></span></button></div>
@@ -7089,7 +7191,7 @@ function polyEventCard(e: PolyEvent): string {
     return `<button class="evcRow" data-poly-go="${esc(m.conditionId)}:0"><span class="evcLbl">${esc(m.outcomes[0] && m.outcomes[0] !== 'Yes' ? m.question : (m.question.replace(/^Will\s+/i, '').slice(0, 44)))}</span><span class="evcBar"><span style="width:${Math.round(p * 100)}%"></span></span><span class="evcPct" data-poly-price="${esc(m.tokenIds[0] || '')}">${polyPct(p)}</span></button>`;
   }).join('');
   const letter = (e.title || '?').trim().charAt(0).toUpperCase();
-  const badge = `${esc(letter)}${e.image ? `<img class="coinImg evcBadgeImg" src="${esc(e.image)}" alt="">` : ''}`;
+  const badge = `${esc(letter)}${e.image && isSafeMediaUrl(e.image) ? `<img class="coinImg evcBadgeImg" src="${esc(e.image)}" alt="">` : ''}`;
   return `<div class="polyCard evcCard strokeLit" data-polym="${esc(e.markets[0]?.conditionId || '')}" role="button" tabindex="0">
     <div class="evcHead"><span class="evcBadge">${badge}</span><h3 class="evcTitle">${esc(e.title)}</h3></div>
     <div class="evcRows">${rows}</div>
@@ -7231,6 +7333,7 @@ function polyPosIconHTML(p: PolyPosition): string {
   // global error handler removes a broken .coinImg, revealing it.
   const t = polyTileFor(p.title);
   if (!p.icon) return `<span class="polyEvIc polyTile" style="background:${t.color}">${esc(t.letter)}</span>`;
+  if (!isSafeMediaUrl(p.icon)) return `<span class="polyEvIc polyTile" style="background:${t.color}">${esc(t.letter)}</span>`;
   return `<span class="polyEvIc polyTile" style="background:${t.color}">${esc(t.letter)}<img class="coinImg" src="${esc(p.icon)}" alt=""></span>`;
 }
 
@@ -8048,7 +8151,7 @@ function showPolyMarket() {
         case 'needs-connect': return { icon: 'ri-key-2-line', headline: 'Connect trading', copy: 'Sign once per session to trade. Your keys stay on this device — nothing is stored.', foot: attr, cta: { id: 'polyConnect', label: 'Connect trading' } };
         case 'needs-wrap': return { icon: 'ri-exchange-line', headline: 'Convert to pUSD', copy: `You hold ${fmtUsd(gate.usdcE ?? 0)} of USDC.e, but trading settles in pUSD. The two swap 1:1.`, foot: 'Deposit at polymarket.com and it converts for you, or use the Collateral Onramp on Polygon.' };
         case 'no-collateral': return { icon: 'ri-wallet-3-line', headline: 'Add pUSD to trade', copy: `Trading settles in pUSD on Polygon, and this wallet has none yet.${gate.usdcNative && gate.usdcNative > 0 ? ` Your ${fmtUsd(gate.usdcNative)} of regular USDC isn’t the trading token.` : ''}`, foot: `Fund ${shortAddr(evmAddressOf())} with pUSD, or deposit at polymarket.com — deposits become pUSD automatically.` };
-        case 'needs-approval': return { icon: 'ri-shield-line', headline: 'Approve pUSD', copy: `One approval lets the Polymarket${m.negRisk ? ' Neg-Risk' : ''} exchange spend your pUSD when you place orders. It’s a standard token approval — gas is paid in POL.`, foot: featureCfg.polymarketBuilderConfigured ? 'You can also approve gas-free via the builder relayer.' : 'A gas-free relayer option unlocks once builder keys are added to the server.', cta: { id: 'polyApprove', label: 'Approve pUSD' } };
+        case 'needs-approval': return { icon: 'ri-shield-line', headline: 'Approve pUSD', copy: `One approval lets the Polymarket${m.negRisk ? ' Neg-Risk' : ''} exchange spend your pUSD when you place orders. The approval amount is unlimited — the standard setup for this exchange, so you approve once instead of per order. You can revoke it any time from the token's Approvals screen. Gas is paid in POL.`, foot: featureCfg.polymarketBuilderConfigured ? 'You can also approve gas-free via the builder relayer.' : 'A gas-free relayer option unlocks once builder keys are added to the server.', cta: { id: 'polyApprove', label: 'Approve pUSD' } };
         default: return { icon: 'ri-information-line', headline: 'Trading unavailable', copy: gate.msg };
       }
     })();
@@ -8512,14 +8615,14 @@ function openHlReview(dex: HlDex, a: HlAsset) {
   const close = openSheet('Review order', `<div class="detCard" style="margin:0">
     <div class="detRow"><span class="detLbl">Market</span><span class="detVal">${esc(hlBaseName(a.name))} perpetual${dex.id ? ' · ' + esc(dex.name) : ''}</span></div>
     <div class="detRow"><span class="detLbl">Side</span><span class="detVal">${isLong ? 'Long' : 'Short'} · ${hlForm.mode === 'market' ? 'Market' : 'Limit'}</span></div>
-    <div class="detRow"><span class="detLbl">Size</span><span class="detVal">${trimNum(sz, 4)} ${esc(hlBaseName(a.name))}</span></div>
-    <div class="detRow"><span class="detLbl">Price</span><span class="detVal">${hlForm.mode === 'market' ? 'Market (~' + fmtPrice(a.markPx) + ')' : fmtPrice(px)}</span></div>
+    <div class="detRow"><span class="detLbl">Size</span><span class="detVal">${trimNum(sz, Math.max(4, a.szDecimals))} ${esc(hlBaseName(a.name))}</span></div>
+    <div class="detRow"><span class="detLbl">Price</span><span class="detVal">${hlForm.mode === 'market' ? 'Market (~' + fmtPrice(a.markPx) + ' · limit ' + fmtPrice(px) + ')' : fmtPrice(px)}</span></div>
     <div class="detRow"><span class="detLbl">Notional</span><span class="detVal">${fmtUsd(notional)}</span></div>
     <div class="detRow"><span class="detLbl">Leverage</span><span class="detVal">${hlForm.leverage}× · cross</span></div>
     <div class="detRow"><span class="detLbl">Margin required</span><span class="detVal">${fmtUsd(notional / hlForm.leverage)}</span></div>
     <div class="detRow"><span class="detLbl">Est. liquidation</span><span class="detVal">${fmtPrice(liq)}</span></div>
-    ${tp > 0 ? `<div class="detRow"><span class="detLbl">Take profit</span><span class="detVal">${fmtPrice(tp)}</span></div>` : ''}
-    ${sl > 0 ? `<div class="detRow"><span class="detLbl">Stop loss</span><span class="detVal">${fmtPrice(sl)}</span></div>` : ''}
+    ${tp > 0 ? `<div class="detRow"><span class="detLbl">Take profit</span><span class="detVal">${fmtPrice(hlRoundPrice(tp, a.szDecimals))}</span></div>` : ''}
+    ${sl > 0 ? `<div class="detRow"><span class="detLbl">Stop loss</span><span class="detVal">${fmtPrice(hlRoundPrice(sl, a.szDecimals))}</span></div>` : ''}
   </div><div class="err" id="hlRevErr" style="display:none"></div><div class="small muted" id="hlRevStatus" style="margin-top:10px"></div><div style="height:12px"></div><button class="ctaWide" id="hlRevGo">${isLong ? 'Place long' : 'Place short'}</button>`);
   ($('#hlRevGo') as HTMLElement).onclick = async () => {
     const goBtn = $('#hlRevGo') as HTMLButtonElement; const status = $('#hlRevStatus'); const er2 = $('#hlRevErr');

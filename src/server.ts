@@ -9,6 +9,7 @@ import { createHmac } from 'node:crypto';
 import { WebSocketServer, WebSocket as WsSocket } from 'ws';
 import { fileURLToPath } from 'url';
 import express, { Request, Response, NextFunction } from 'express';
+import compression from 'compression';
 import { execSync } from 'child_process';
 import { PublicKey } from '@solana/web3.js';
 import { getAssociatedTokenAddressSync } from '@solana/spl-token';
@@ -42,6 +43,13 @@ const TLS = ensureTls();
 
 const app = express();
 app.disable('x-powered-by');
+// Deep audit 2026-11-22: responses were served completely
+// uncompressed — the ~1.4 MB main bundle cost ~1.4 MB on the wire on
+// every cold load (the long-standing slow phone boot). gzip/brotli
+// cuts the JS/CSS/HTML payload by roughly two-thirds. Transport
+// encoding only: the bytes a browser decodes are identical, so the
+// boot watchdog's hash pins and the integrity manifest are unaffected.
+app.use(compression());
 app.use(express.json({ limit: '256kb' }));
 app.use((req: Request, res: Response, next: NextFunction) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -169,6 +177,12 @@ class SwrCache {
       try {
         const data = await fetcher();
         this.entries.set(key, { at: Date.now(), data });
+        // Deep audit 2026-11-22: entries/cooldowns were never evicted
+        // in memory (only the disk dump was sliced) and keys are
+        // attacker-influenced (arbitrary market/chart IDs) — bound
+        // both maps, oldest first.
+        if (this.entries.size > 400) { const sorted = [...this.entries.entries()].sort((a, b) => a[1].at - b[1].at); for (const [k] of sorted.slice(0, this.entries.size - 400)) this.entries.delete(k); }
+        if (this.cooldownUntil.size > 400) { const now = Date.now(); for (const [k, v] of this.cooldownUntil) if (v <= now) this.cooldownUntil.delete(k); if (this.cooldownUntil.size > 400) { const sorted = [...this.cooldownUntil.entries()].sort((a, b) => a[1] - b[1]); for (const [k] of sorted.slice(0, this.cooldownUntil.size - 400)) this.cooldownUntil.delete(k); } }
         this.onStore();
         return data;
       } catch (e) {
@@ -671,12 +685,15 @@ app.post('/api/rpc/:chain', rateLimit(300), async (req, res) => {
   const calls = Array.isArray(req.body) ? req.body : [req.body];
   for (const c of calls) {
     const m = typeof (c as any)?.method === 'string' ? ((c as any).method as string).toLowerCase() : '';
-    if (!m || RPC_BLOCKED_METHODS.has(m)) { res.status(403).json({ jsonrpc: '2.0', id: (c as any)?.id ?? null, error: { code: -32601, message: 'method not allowed on this relay' } }); return; }
+    // Deep audit 2026-11-22: debug_/trace_ namespaces are never used
+    // by the app and are the heaviest calls a node offers — refuse
+    // the whole namespaces alongside the named scan methods.
+    if (!m || RPC_BLOCKED_METHODS.has(m) || m.startsWith('debug_') || m.startsWith('trace_')) { res.status(403).json({ jsonrpc: '2.0', id: (c as any)?.id ?? null, error: { code: -32601, message: 'method not allowed on this relay' } }); return; }
   }
   try {
     const { status, text } = await pool.post(req.body || {}, 15000);
     res.status(status).type('application/json').send(text);
-  } catch (e) { res.status(502).json({ jsonrpc: '2.0', id: (req.body as any)?.id ?? null, error: { code: -32000, message: String((e as Error).message) } }); }
+  } catch (e) { res.status(502).json({ jsonrpc: '2.0', id: (req.body as any)?.id ?? null, error: { code: -32000, message: String((e as Error).message).replace(/https?:\/\/\S+/gi, '').slice(0, 120) } }); }
 });
 // ---- Solana validators, trimmed + cached ----
 // getVoteAccounts returns EVERY vote account (thousands of entries,
@@ -723,13 +740,35 @@ const UTXO_APIS: Record<string, string[]> = {
   bitcoin: ['https://blockstream.info', 'https://mempool.space'],
   litecoin: ['https://litecoinspace.org'],
 };
+// Deep audit 2026-11-22: only the RPC pool capped upstream response
+// size (16 MB); every other proxy buffered the entire upstream body
+// unbounded — a huge or compromised upstream response was a memory
+// DoS. All proxy body reads now go through this capped reader.
+const MAX_UPSTREAM_BODY = 16 * 1024 * 1024;
+async function readBodyCapped(r: globalThis.Response): Promise<string> {
+  const cl = Number(r.headers.get('content-length') || 0);
+  if (cl > MAX_UPSTREAM_BODY) throw new Error('upstream response too large');
+  const reader = (r.body as any)?.getReader?.();
+  if (!reader) { const t = await r.text(); if (t.length > MAX_UPSTREAM_BODY) throw new Error('upstream response too large'); return t; }
+  const chunks: Uint8Array[] = []; let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > MAX_UPSTREAM_BODY) { try { await reader.cancel(); } catch { /* already closed */ } throw new Error('upstream response too large'); }
+    chunks.push(value);
+  }
+  const all = new Uint8Array(total); let off = 0;
+  for (const c of chunks) { all.set(c, off); off += c.byteLength; }
+  return new TextDecoder().decode(all);
+}
 async function utxoGet(chain: string, p: string): Promise<{ status: number; text: string }> {
   const bases = UTXO_APIS[chain]; if (!bases) throw new Error('unknown utxo chain');
   let lastErr: Error | null = null;
   for (const base of bases) {
     try {
       const r = await fetch(`${base}${p}`, { signal: AbortSignal.timeout(10000) });
-      const text = await r.text();
+      const text = await readBodyCapped(r);
       if (r.status >= 500) { lastErr = new Error(`utxo api ${r.status}`); continue; }
       return { status: r.status, text };
     } catch (e) { lastErr = e as Error; }
@@ -750,19 +789,19 @@ async function utxoPostTx(chain: string, hex: string): Promise<string> {
   }
   throw lastErr ?? new Error('broadcast failed');
 }
-app.get('/api/utxo/:chain/address/:addr', async (req, res) => {
+app.get('/api/utxo/:chain/address/:addr', rateLimit(120), async (req, res) => {
   try {
     const { status, text } = await utxoGet(String(req.params.chain), `/api/address/${encodeURIComponent(req.params.addr)}`);
     res.status(status).type('application/json').send(text);
   } catch { res.status(502).json({ error: 'UTXO data unavailable' }); }
 });
-app.get('/api/utxo/:chain/txs/:addr', async (req, res) => {
+app.get('/api/utxo/:chain/txs/:addr', rateLimit(120), async (req, res) => {
   try {
     const { status, text } = await utxoGet(String(req.params.chain), `/api/address/${encodeURIComponent(req.params.addr)}/txs`);
     res.status(status).type('application/json').send(text);
   } catch { res.status(502).json({ error: 'UTXO data unavailable' }); }
 });
-app.get('/api/utxo/:chain/utxo/:addr', async (req, res) => {
+app.get('/api/utxo/:chain/utxo/:addr', rateLimit(120), async (req, res) => {
   try {
     const { status, text } = await utxoGet(String(req.params.chain), `/api/address/${encodeURIComponent(req.params.addr)}/utxo`);
     res.status(status).type('application/json').send(text);
@@ -772,7 +811,7 @@ app.get('/api/utxo/:chain/utxo/:addr', async (req, res) => {
 // the source offers it (blockstream), else the mempool-style
 // /api/v1/fees/recommended (mempool.space + litecoinspace). Target:
 // roughly next-3-blocks / half-hour. Floored at 1 sat/vB.
-app.get('/api/utxo/:chain/fees', async (req, res) => {
+app.get('/api/utxo/:chain/fees', rateLimit(120), async (req, res) => {
   const chain = String(req.params.chain);
   try {
     try {
@@ -951,7 +990,7 @@ async function fetchBalanceUpstream(chain: string, address: string, token: strin
   const hex = await pool.rpcEach('eth_getBalance', [address, 'latest']);
   return Number(BigInt(hex)) / 1e18;
 }
-app.get('/api/balance/:chain', async (req, res) => {
+app.get('/api/balance/:chain', rateLimit(120), async (req, res) => {
   const chain = String(req.params.chain || '').toLowerCase();
   const address = String(req.query.address || '');
   const token = req.query.token ? String(req.query.token) : null;
@@ -1007,7 +1046,7 @@ app.get('/api/config', (_req, res) => {
 // a public address the user is about to interact with, the same data
 // the client's existing GoPlus address check already sends out.
 const TW_ASSET_RE = /^c\d{1,12}(_t[0-9a-zA-Z.:_-]{1,90})?$/;
-app.post('/api/tw/tickers', async (req, res) => {
+app.post('/api/tw/tickers', rateLimit(60), async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   if (!twConfigured()) return res.json({ configured: false, tickers: {} });
   const assets = Array.isArray(req.body?.assets)
@@ -1016,7 +1055,7 @@ app.post('/api/tw/tickers', async (req, res) => {
   const tickers = await twTickers(assets);
   return res.json({ configured: true, tickers });
 });
-app.get('/api/tw/coinstatus', async (req, res) => {
+app.get('/api/tw/coinstatus', rateLimit(60), async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   if (!twConfigured()) return res.json({ configured: false, risk: null });
   const asset = String(req.query.asset || '');
@@ -1024,7 +1063,7 @@ app.get('/api/tw/coinstatus', async (req, res) => {
   const risk = await twCoinStatus(asset);
   return res.json({ configured: true, risk });
 });
-app.get('/api/tw/validate', async (req, res) => {
+app.get('/api/tw/validate', rateLimit(60), async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   if (!twConfigured()) return res.json({ configured: false, validation: null });
   const asset = String(req.query.asset || '');
@@ -1049,7 +1088,7 @@ async function hlPost(body: unknown): Promise<any> {
   // per-dex account loop) forever.
   const r = await fetch(HL_API, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(15000) });
   if (!r.ok) throw new Error('hl ' + r.status);
-  return r.json();
+  return JSON.parse(await readBodyCapped(r));
 }
 let hlMarketsCache: { at: number; data: unknown } = { at: 0, data: null };
 let hlDexListCache: { at: number; dexes: any[] } = { at: 0, dexes: [] };
@@ -1109,7 +1148,7 @@ async function hlMarkets(): Promise<unknown> {
 // them); interval is whitelisted; the window is bounded.
 const HL_CANDLE_INTERVALS = new Set(['15m', '1h', '4h', '1d']);
 const hlCandleCache = new Map<string, { at: number; data: unknown }>();
-app.get('/api/hl/candles', async (req, res) => {
+app.get('/api/hl/candles', rateLimit(120), async (req, res) => {
   const coin = String(req.query.coin || '');
   const interval = String(req.query.interval || '1h');
   const hours = Math.max(1, Math.min(24 * 31, Number(req.query.hours || 24) || 24));
@@ -1189,7 +1228,7 @@ app.post('/api/hl/exchange', rateLimit(60), async (req, res) => {
   if (!body || typeof body !== 'object' || !body.action || typeof body.action !== 'object' || typeof body.action.type !== 'string' || typeof body.nonce !== 'number' || !body.signature || typeof body.signature !== 'object') { res.status(400).json({ error: 'malformed exchange payload' }); return; }
   try {
     const r = await fetch('https://api.hyperliquid.xyz/exchange', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(15000) });
-    const text = await r.text();
+    const text = await readBodyCapped(r);
     res.status(r.status).type('application/json').send(text);
   } catch { res.status(502).json({ error: 'hyperliquid unavailable' }); }
 });
@@ -1205,7 +1244,7 @@ function isPlausibleAddress(s: unknown): boolean {
   return typeof s === 'string' && (/^0x[0-9a-fA-F]{40}$/.test(s) || /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(s));
 }
 const gtCache = new Map<string, { at: number; data: unknown }>();
-app.get('/api/gt/trending/:chain', async (req, res) => {
+app.get('/api/gt/trending/:chain', rateLimit(120), async (req, res) => {
   const net = GT_NETWORKS[String(req.params.chain || '')];
   if (!net) { res.status(400).json({ error: 'unsupported network' }); return; }
   const hit = gtCache.get(net);
@@ -1432,7 +1471,7 @@ async function polyProxy(res: Response, cacheKey: string, url: string, ttlMs: nu
   if (hit && Date.now() - hit.at < ttlMs) { res.status(hit.status).type('json').send(hit.body); return; }
   try {
     const r = await fetch(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(10000) });
-    const body = await r.text();
+    const body = await readBodyCapped(r);
     if (r.ok) cacheSet(polyCache, cacheKey, { at: Date.now(), body, status: r.status }, 400);
     res.status(r.status).type('json').send(body);
   } catch { if (hit) { res.status(hit.status).type('json').send(hit.body); return; } res.status(502).json({ error: 'polymarket upstream unavailable' }); }
@@ -1542,22 +1581,28 @@ app.get('/api/polymarket/builder-status', (_req, res) => {
   const code = builderCode();
   res.json({ configured: keys, keysConfigured: keys, codeConfigured: !!code, code, address: builderAddress() });
 });
-app.post('/api/polymarket/sign', rateLimit(60), (req, res) => {
+app.post('/api/polymarket/relayer-submit', rateLimit(60), async (req, res) => {
   const creds = builderCreds();
   if (!creds) { res.status(503).json({ error: 'builder_not_configured' }); return; }
-  const { method, path: rpath, body } = (req.body || {}) as { method?: unknown; path?: unknown; body?: unknown };
-  // Audit 2026-11-21 (P0): this endpoint was an unauthenticated
-  // signing oracle — any method, any path, any body — and it returns
-  // the builder API key + passphrase alongside the HMAC, so arbitrary
-  // Builder/Relayer API actions could be minted by anyone. The app
-  // has exactly ONE consumer (relayerSubmit → POST /submit), so the
-  // oracle is now pinned to that single operation; anything else is
-  // refused before any credential material is touched.
-  if (method !== 'POST' || rpath !== '/submit' || typeof body !== 'string' || body.length > 64 * 1024) { res.status(400).json({ error: 'bad sign request' }); return; }
+  // Deep audit 2026-11-22 (closes the 2026-11-21 P0 residual): the
+  // old /api/polymarket/sign endpoint returned the builder API key +
+  // passphrase + a valid HMAC to ANY unauthenticated caller for the
+  // one pinned operation. It is GONE. Relayer submissions are now
+  // proxied end-to-end here: the client sends only the unsigned
+  // relayer transaction JSON, the builder headers are computed and
+  // attached server-side, and the upstream response is returned —
+  // builder credential material never reaches a browser again.
+  const tx = req.body;
+  if (!tx || typeof tx !== 'object' || Array.isArray(tx)) { res.status(400).json({ error: 'bad relayer transaction' }); return; }
+  const body = JSON.stringify(tx);
+  if (body.length > 64 * 1024) { res.status(400).json({ error: 'bad relayer transaction' }); return; }
   const ts = Math.floor(Date.now() / 1000);
-  const message = `${ts}${method}${rpath}${typeof body === 'string' ? body : ''}`;
+  const message = `${ts}POST/submit${body}`;
   const sig = createHmac('sha256', Buffer.from(creds.secret, 'base64')).update(message).digest('base64').replace(/\+/g, '-').replace(/\//g, '_');
-  res.json({ POLY_BUILDER_API_KEY: creds.key, POLY_BUILDER_TIMESTAMP: String(ts), POLY_BUILDER_PASSPHRASE: creds.passphrase, POLY_BUILDER_SIGNATURE: sig });
+  try {
+    const r = await fetch('https://relayer-v2.polymarket.com/submit', { method: 'POST', headers: { 'content-type': 'application/json', POLY_BUILDER_API_KEY: creds.key, POLY_BUILDER_TIMESTAMP: String(ts), POLY_BUILDER_PASSPHRASE: creds.passphrase, POLY_BUILDER_SIGNATURE: sig }, body, signal: AbortSignal.timeout(15000) });
+    res.status(r.status).type('application/json').send(await readBodyCapped(r));
+  } catch { res.status(502).json({ error: 'relayer unavailable' }); }
 });
 // Live relay: one upstream CLOB market-channel socket, the union of
 // every connected client's subscriptions, events fanned back out
@@ -1595,6 +1640,12 @@ function polyUpstreamConnect() {
         if (e && typeof e.asset_id === 'string') assets.add(e.asset_id);
         if (e && Array.isArray(e.price_changes)) for (const pc of e.price_changes) if (pc && typeof pc.asset_id === 'string') assets.add(pc.asset_id);
         if (e && e.event_type === 'book' && typeof e.asset_id === 'string') polyLastBook.set(e.asset_id, Date.now());
+        // Deep audit 2026-11-22: polyLastBook grew one entry per asset
+        // ever seen and was never pruned — subscriptions are
+        // user-controlled, so the map was unbounded. Book timestamps
+        // are only consulted for a 2.4 s staleness check; anything
+        // older than 10 min is dead weight.
+        if (polyLastBook.size > 2000) { const cut = Date.now() - 600000; for (const [k, v] of polyLastBook) if (v < cut) polyLastBook.delete(k); }
       }
     } catch { return; }
     if (!assets.size) return;
@@ -1646,6 +1697,14 @@ function polySyncUnion() {
 const CL_SYMBOLS = ['btc/usd', 'eth/usd', 'sol/usd', 'xrp/usd', 'doge/usd', 'hype/usd'];
 const CL_KEEP_MS = 2 * 60 * 60 * 1000;
 const clBuffers = new Map<string, { t: number; v: number }[]>();
+// Deep audit 2026-11-22: RTDS reconnects were a fixed 5 s for all six
+// symbols — during an upstream outage all six sockets retried in
+// lockstep forever. Per-symbol exponential backoff + jitter instead.
+const clAttempts = new Map<string, number>();
+function clRetryDelay(sym: string): number {
+  const n = (clAttempts.get(sym) || 0) + 1; clAttempts.set(sym, n);
+  return Math.min(60000, 5000 * 2 ** Math.min(n - 1, 4)) + Math.floor(Math.random() * 1000);
+}
 let clDirty = false;
 function clPush(sym: string, t: number, v: number) {
   if (!Number.isFinite(t) || !Number.isFinite(v) || v <= 0) return;
@@ -1669,13 +1728,14 @@ function clConnect(sym: string) {
   let ws: WsSocket;
   // handshakeTimeout: a hung TLS/WS handshake otherwise parks the
   // socket in CONNECTING forever (audit 2026-11-21).
-  try { ws = new WsSocket('wss://ws-live-data.polymarket.com', { handshakeTimeout: 10000 }); } catch { setTimeout(() => clConnect(sym), 5000); return; }
+  try { ws = new WsSocket('wss://ws-live-data.polymarket.com', { handshakeTimeout: 10000 }); } catch { setTimeout(() => clConnect(sym), clRetryDelay(sym)); return; }
   // `ws` emits BOTH 'error' and 'close' for one failure — without
   // this guard each failure scheduled two reconnects, then four,
   // then eight (audit 2026-11-21).
   let gone = false;
-  const retry = () => { if (gone) return; gone = true; try { ws.close(); } catch { /* already gone */ } setTimeout(() => clConnect(sym), 5000); };
+  const retry = () => { if (gone) return; gone = true; try { ws.close(); } catch { /* already gone */ } setTimeout(() => clConnect(sym), clRetryDelay(sym)); };
   ws.on('open', () => {
+    clAttempts.delete(sym);
     try {
       ws.send(JSON.stringify({
         action: 'subscribe',
@@ -1913,10 +1973,10 @@ app.get('/api/fx', async (_req, res) => {
 async function passThrough(res: Response, url: string, init?: { method?: string; body?: string }) {
   try {
     const r = await fetch(url, { method: init?.method || 'GET', headers: { 'content-type': 'application/json', accept: 'application/json' }, body: init?.body, signal: AbortSignal.timeout(30000) });
-    res.status(r.status).type('application/json').send(await r.text());
+    res.status(r.status).type('application/json').send(await readBodyCapped(r));
   } catch { res.status(502).json({ error: 'Swap provider unreachable' }); }
 }
-app.get('/api/jupiter/quote', async (req, res) => {
+app.get('/api/jupiter/quote', rateLimit(60), async (req, res) => {
   const qs = new URLSearchParams();
   for (const [k, v] of Object.entries(req.query)) if (typeof v === 'string' && v.length <= 200) qs.set(k, v);
   await passThrough(res, `https://lite-api.jup.ag/swap/v1/quote?${qs.toString()}`);
@@ -2150,8 +2210,13 @@ if (TLS) {
   // Audit NEW LOW 7: never reflect an unvalidated Host header into the
   // redirect Location — accept only a plain hostname/IP shape, else
   // fall back to the deployment's own address.
-  http.createServer((req, res) => { const raw = (req.headers.host || '').replace(/:\d+$/, ''); const host = /^[A-Za-z0-9.-]{1,253}$/.test(raw) && !raw.includes('..') ? raw : '79.108.164.56'; res.writeHead(301, { Location: `https://${host}:${PORT}${req.url}` }); res.end(); }).listen(REDIRECT_PORT, () => console.log(`Syn Wallet redirect HTTP ${REDIRECT_PORT} -> HTTPS ${PORT}`));
+  http.createServer((req, res) => { const raw = (req.headers.host || '').replace(/:\d+$/, ''); const host = /^(\d{1,3}\.){3}\d{1,3}$/.test(raw) || raw === 'localhost' ? raw : '79.108.164.56'; res.writeHead(301, { Location: `https://${host}:${PORT}${req.url}` }); res.end(); }).listen(REDIRECT_PORT, () => console.log(`Syn Wallet redirect HTTP ${REDIRECT_PORT} -> HTTPS ${PORT}`));
 } else {
-  const mainServer = app.listen(PORT, () => console.log(`Syn Wallet HTTP on ${PORT} (no TLS)`));
-  attachPolyRelay(mainServer);
+  // Deep audit 2026-11-22: the no-TLS fallback served the wallet over
+  // plain HTTP — a silent downgrade for an app whose whole threat
+  // model is key custody. Fail closed instead: if the self-signed
+  // cert cannot be created, refuse to start so the failure is loud
+  // in the service log, never a quiet HTTP wallet.
+  console.error('Syn Wallet: TLS certificate unavailable — refusing to serve over plain HTTP.');
+  process.exit(1);
 }

@@ -63,7 +63,7 @@ export interface PriceChartHandle {
 }
 
 const UP = '#34d399';
-const escHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const escHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 const DOWN = '#f87171';
 const BASELINE = 'rgba(139,149,165,.5)';
 const GUIDE = 'rgba(199,208,218,.4)';
