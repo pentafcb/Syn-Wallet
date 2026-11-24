@@ -13,6 +13,7 @@ import compression from 'compression';
 import { execSync } from 'child_process';
 import { PublicKey } from '@solana/web3.js';
 import { getAssociatedTokenAddressSync } from '@solana/spl-token';
+import { keccak_256 } from '@noble/hashes/sha3';
 import { BUILD_ID as STAMPED_BUILD_ID } from './build-id.js';
 import { CONNECT_HOSTS } from './csp-hosts.js';
 import { twConfigured, twCoinStatus, twValidate, twTickers } from './tw.js';
@@ -93,10 +94,16 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 // per minute), with a stricter 60/minute bucket for the expensive
 // uncached paths. Exceeding it is a plain 429 JSON.
 const rlBuckets = new Map<string, { at: number; n: number }>();
-function rateLimit(maxPerMin: number) {
+function rateLimit(maxPerMin: number, label?: string) {
   return (req: Request, res: Response, next: NextFunction) => {
     const ip = (req.socket.remoteAddress || 'unknown').replace(/^::ffff:/, '');
-    const key = `${maxPerMin}:${ip}`;
+    // Buckets are PER ROUTE (label), as every call site intends:
+    // keying by the limit number alone made every 120/min route share
+    // ONE bucket, so ordinary app traffic (balances, token logos,
+    // history) plus the per-card Hyperliquid feeds starved skew and
+    // candles into 429s while the unlimited markets route sailed on
+    // (owner's bug 2026-11-24: prices load, Long/Short % never does).
+    const key = `${label || maxPerMin}:${ip}`;
     const now = Date.now();
     let b = rlBuckets.get(key);
     if (!b || now - b.at >= 60000) { b = { at: now, n: 0 }; rlBuckets.set(key, b); }
@@ -422,34 +429,39 @@ async function binanceKlines(symbol: string, interval: string, limit: number): P
 // 1-day OHLC arrives as 30-minute candles and the client merges them
 // into hours). Public market data only; 5-minute fresh cache per
 // id+days with SWR + stale fallback.
+// The candle loader behind /api/ohlc, shared with /api/dex/ohlc
+// (which resolves a contract to its CoinGecko id when it has one).
+async function cgOhlcData(id: string, days: string): Promise<{ data: any; stale: boolean }> {
+  const key = `${id}:${days}`;
+  return ohlcCache.get(key, async () => {
+    const sym = BINANCE_BY_CG[id];
+    if (sym) {
+      const [interval, limit] = days === '1' ? ['1h', 24] : days === '7' ? ['4h', 42] : days === '30' ? ['4h', 180] : ['1d', 365];
+      const kl = await binanceKlines(sym, interval as string, limit as number);
+      if (kl && kl.length) return { id, days: Number(days), candles: kl, at: Date.now() };
+    }
+    const [ohlc, mc] = await Promise.all([
+      cgFetch(`https://api.coingecko.com/api/v3/coins/${id}/ohlc?vs_currency=usd&days=${days}`),
+      cgFetch(`https://api.coingecko.com/api/v3/coins/${id}/market_chart?vs_currency=usd&days=${days}`),
+    ]);
+    const raw: [number, number, number, number, number][] = (Array.isArray(ohlc) ? ohlc : []).filter((c: any) => Array.isArray(c) && c.length >= 5 && c[4] > 0);
+    const vols: [number, number][] = (mc?.total_volumes || []).filter((p: any) => Array.isArray(p) && p[1] >= 0);
+    // Sum USD volume into each candle's window [t, nextT), then convert to
+    // coin units with the candle's close — an honest traded-volume estimate.
+    const candles = raw.map((c, i) => {
+      const end = i + 1 < raw.length ? raw[i + 1][0] : Number.POSITIVE_INFINITY;
+      let usd = 0; for (const [vt, vv] of vols) if (vt >= c[0] && vt < end) usd += vv;
+      return [c[0], c[1], c[2], c[3], c[4], c[4] > 0 ? usd / c[4] : 0];
+    });
+    return { id, days: Number(days), candles, at: Date.now() };
+  });
+}
 app.get('/api/ohlc', async (req, res) => {
   const id = String(req.query.id || '').toLowerCase();
   if (!/^[a-z0-9-]{2,60}$/.test(id)) { res.status(400).json({ error: 'unknown coin' }); return; }
   const days = ['1', '7', '30', '365'].includes(String(req.query.days)) ? String(req.query.days) : '7';
-  const key = `${id}:${days}`;
   try {
-    const { data, stale } = await ohlcCache.get(key, async () => {
-      const sym = BINANCE_BY_CG[id];
-      if (sym) {
-        const [interval, limit] = days === '1' ? ['1h', 24] : days === '7' ? ['4h', 42] : days === '30' ? ['4h', 180] : ['1d', 365];
-        const kl = await binanceKlines(sym, interval as string, limit as number);
-        if (kl && kl.length) return { id, days: Number(days), candles: kl, at: Date.now() };
-      }
-      const [ohlc, mc] = await Promise.all([
-        cgFetch(`https://api.coingecko.com/api/v3/coins/${id}/ohlc?vs_currency=usd&days=${days}`),
-        cgFetch(`https://api.coingecko.com/api/v3/coins/${id}/market_chart?vs_currency=usd&days=${days}`),
-      ]);
-      const raw: [number, number, number, number, number][] = (Array.isArray(ohlc) ? ohlc : []).filter((c: any) => Array.isArray(c) && c.length >= 5 && c[4] > 0);
-      const vols: [number, number][] = (mc?.total_volumes || []).filter((p: any) => Array.isArray(p) && p[1] >= 0);
-      // Sum USD volume into each candle's window [t, nextT), then convert to
-      // coin units with the candle's close — an honest traded-volume estimate.
-      const candles = raw.map((c, i) => {
-        const end = i + 1 < raw.length ? raw[i + 1][0] : Number.POSITIVE_INFINITY;
-        let usd = 0; for (const [vt, vv] of vols) if (vt >= c[0] && vt < end) usd += vv;
-        return [c[0], c[1], c[2], c[3], c[4], c[4] > 0 ? usd / c[4] : 0];
-      });
-      return { id, days: Number(days), candles, at: Date.now() };
-    });
+    const { data, stale } = await cgOhlcData(id, days);
     res.json(stale ? { ...data, stale: true } : data);
   } catch (e) {
     res.status(502).json({ error: 'OHLC unavailable' });
@@ -745,17 +757,17 @@ const UTXO_APIS: Record<string, string[]> = {
 // unbounded — a huge or compromised upstream response was a memory
 // DoS. All proxy body reads now go through this capped reader.
 const MAX_UPSTREAM_BODY = 16 * 1024 * 1024;
-async function readBodyCapped(r: globalThis.Response): Promise<string> {
+async function readBodyCapped(r: globalThis.Response, cap = MAX_UPSTREAM_BODY): Promise<string> {
   const cl = Number(r.headers.get('content-length') || 0);
-  if (cl > MAX_UPSTREAM_BODY) throw new Error('upstream response too large');
+  if (cl > cap) throw new Error('upstream response too large');
   const reader = (r.body as any)?.getReader?.();
-  if (!reader) { const t = await r.text(); if (t.length > MAX_UPSTREAM_BODY) throw new Error('upstream response too large'); return t; }
+  if (!reader) { const t = await r.text(); if (t.length > cap) throw new Error('upstream response too large'); return t; }
   const chunks: Uint8Array[] = []; let total = 0;
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
     total += value.byteLength;
-    if (total > MAX_UPSTREAM_BODY) { try { await reader.cancel(); } catch { /* already closed */ } throw new Error('upstream response too large'); }
+    if (total > cap) { try { await reader.cancel(); } catch { /* already closed */ } throw new Error('upstream response too large'); }
     chunks.push(value);
   }
   const all = new Uint8Array(total); let off = 0;
@@ -789,19 +801,19 @@ async function utxoPostTx(chain: string, hex: string): Promise<string> {
   }
   throw lastErr ?? new Error('broadcast failed');
 }
-app.get('/api/utxo/:chain/address/:addr', rateLimit(120), async (req, res) => {
+app.get('/api/utxo/:chain/address/:addr', rateLimit(120, 'utxo'), async (req, res) => {
   try {
     const { status, text } = await utxoGet(String(req.params.chain), `/api/address/${encodeURIComponent(req.params.addr)}`);
     res.status(status).type('application/json').send(text);
   } catch { res.status(502).json({ error: 'UTXO data unavailable' }); }
 });
-app.get('/api/utxo/:chain/txs/:addr', rateLimit(120), async (req, res) => {
+app.get('/api/utxo/:chain/txs/:addr', rateLimit(120, 'utxo'), async (req, res) => {
   try {
     const { status, text } = await utxoGet(String(req.params.chain), `/api/address/${encodeURIComponent(req.params.addr)}/txs`);
     res.status(status).type('application/json').send(text);
   } catch { res.status(502).json({ error: 'UTXO data unavailable' }); }
 });
-app.get('/api/utxo/:chain/utxo/:addr', rateLimit(120), async (req, res) => {
+app.get('/api/utxo/:chain/utxo/:addr', rateLimit(120, 'utxo'), async (req, res) => {
   try {
     const { status, text } = await utxoGet(String(req.params.chain), `/api/address/${encodeURIComponent(req.params.addr)}/utxo`);
     res.status(status).type('application/json').send(text);
@@ -811,7 +823,7 @@ app.get('/api/utxo/:chain/utxo/:addr', rateLimit(120), async (req, res) => {
 // the source offers it (blockstream), else the mempool-style
 // /api/v1/fees/recommended (mempool.space + litecoinspace). Target:
 // roughly next-3-blocks / half-hour. Floored at 1 sat/vB.
-app.get('/api/utxo/:chain/fees', rateLimit(120), async (req, res) => {
+app.get('/api/utxo/:chain/fees', rateLimit(120, 'utxo'), async (req, res) => {
   const chain = String(req.params.chain);
   try {
     try {
@@ -990,7 +1002,7 @@ async function fetchBalanceUpstream(chain: string, address: string, token: strin
   const hex = await pool.rpcEach('eth_getBalance', [address, 'latest']);
   return Number(BigInt(hex)) / 1e18;
 }
-app.get('/api/balance/:chain', rateLimit(120), async (req, res) => {
+app.get('/api/balance/:chain', rateLimit(120, 'balance'), async (req, res) => {
   const chain = String(req.params.chain || '').toLowerCase();
   const address = String(req.query.address || '');
   const token = req.query.token ? String(req.query.token) : null;
@@ -1098,8 +1110,26 @@ async function hlDexList(): Promise<any[]> {
   if (Array.isArray(dexes) && dexes.length) hlDexListCache = { at: Date.now(), dexes };
   return dexes;
 }
+let hlMarketsInflight: Promise<unknown> | null = null;
 async function hlMarkets(): Promise<unknown> {
   if (hlMarketsCache.data && Date.now() - hlMarketsCache.at < 20000) return hlMarketsCache.data;
+  // Stale-while-revalidate (2026-11-24): a cold sweep walks every
+  // dex upstream and can take seconds; a phone must never block on
+  // it when a previous snapshot exists. Serve the stale snapshot
+  // and refresh behind it (deduped); only the first-ever request
+  // pays the sweep.
+  if (hlMarketsCache.data) {
+    if (!hlMarketsInflight) {
+      hlMarketsInflight = hlMarketsSweep().catch(() => hlMarketsCache.data).finally(() => { hlMarketsInflight = null; });
+      void hlMarketsInflight;
+    }
+    return hlMarketsCache.data;
+  }
+  if (hlMarketsInflight) return hlMarketsInflight;
+  hlMarketsInflight = hlMarketsSweep().finally(() => { hlMarketsInflight = null; });
+  return hlMarketsInflight;
+}
+async function hlMarketsSweep(): Promise<unknown> {
   try {
     const dexes = await hlDexList();
     // Per-dex isolation with gentle concurrency (3 at a time — the
@@ -1147,28 +1177,135 @@ async function hlMarkets(): Promise<unknown> {
 // dex coins carry their 'dex:' prefix, which is how HL addresses
 // them); interval is whitelisted; the window is bounded.
 const HL_CANDLE_INTERVALS = new Set(['15m', '1h', '4h', '1d']);
-const hlCandleCache = new Map<string, { at: number; data: unknown }>();
-app.get('/api/hl/candles', rateLimit(120), async (req, res) => {
+const hlCandleCache = new Map<string, { at: number; data: any }>();
+const hlCandleInflight = new Map<string, Promise<any>>();
+// One upstream candle fetch per key, shared by the single route and
+// the batch sparkline route below; fresh cache 30s, and a stale copy
+// beats an error when the upstream throttles.
+function hlCandlesFor(coin: string, interval: string, hours: number): Promise<any> {
+  const key = `${coin}|${interval}|${hours}`;
+  const hit = hlCandleCache.get(key);
+  if (hit && Date.now() - hit.at < 30000) return Promise.resolve(hit.data);
+  const flying = hlCandleInflight.get(key);
+  if (flying) return hit ? Promise.resolve(hit.data) : flying;
+  const p = (async () => {
+    try {
+      const end = Date.now(); const start = end - hours * 3600_000;
+      const raw = await hlPost({ type: 'candleSnapshot', req: { type: 'candleSnapshot', coin, interval, startTime: start, endTime: end } });
+      const candles = (Array.isArray(raw) ? raw : []).map((k: any) => ({ time: Number(k.t), open: parseFloat(k.o), high: parseFloat(k.h), low: parseFloat(k.l), close: parseFloat(k.c), volume: parseFloat(k.v || '0') })).filter((c: any) => c.time > 0 && c.close > 0);
+      const data = { coin, interval, candles };
+      cacheSet(hlCandleCache, key, { at: Date.now(), data }, 300);
+      return data;
+    } catch {
+      // Throttled upstream: serve the last good candles (any age)
+      // rather than blanking the chart — the next tick retries.
+      if (hit) return hit.data;
+      throw new Error('hyperliquid unavailable');
+    }
+  })();
+  hlCandleInflight.set(key, p);
+  void p.then(() => hlCandleInflight.delete(key), () => hlCandleInflight.delete(key));
+  // Stale-while-revalidate (2026-11-24): an expired copy answers
+  // instantly and the fetch above refreshes it in the background —
+  // a batch of 40 coins must never wait on 40 upstream round trips.
+  if (hit) return Promise.resolve(hit.data);
+  return p;
+}
+app.get('/api/hl/candles', rateLimit(120, 'hl-candles'), async (req, res) => {
   const coin = String(req.query.coin || '');
   const interval = String(req.query.interval || '1h');
   const hours = Math.max(1, Math.min(24 * 31, Number(req.query.hours || 24) || 24));
   if (!/^[A-Za-z0-9:._-]{1,32}$/.test(coin) || !HL_CANDLE_INTERVALS.has(interval)) { res.status(400).json({ error: 'bad candle request' }); return; }
-  const key = `${coin}|${interval}|${hours}`;
-  const hit = hlCandleCache.get(key);
-  if (hit && Date.now() - hit.at < 30000) { res.json(hit.data); return; }
-  try {
-    const end = Date.now(); const start = end - hours * 3600_000;
-    const raw = await hlPost({ type: 'candleSnapshot', req: { type: 'candleSnapshot', coin, interval, startTime: start, endTime: end } });
-    const candles = (Array.isArray(raw) ? raw : []).map((k: any) => ({ time: Number(k.t), open: parseFloat(k.o), high: parseFloat(k.h), low: parseFloat(k.l), close: parseFloat(k.c), volume: parseFloat(k.v || '0') })).filter((c: any) => c.time > 0 && c.close > 0);
-    const data = { coin, interval, candles };
-    cacheSet(hlCandleCache, key, { at: Date.now(), data }, 300);
-    res.json(data);
-  } catch {
-    // Throttled upstream: serve the last good candles (any age)
-    // rather than blanking the chart — the next tick retries.
-    if (hit) { res.json(hit.data); return; }
-    res.status(502).json({ error: 'hyperliquid unavailable' });
-  }
+  try { res.json(await hlCandlesFor(coin, interval, hours)); } catch { res.status(502).json({ error: 'hyperliquid unavailable' }); }
+});
+// Long/short skew for one perp, from the market's LIVE order book:
+// Hyperliquid publishes no long/short position split, so the split
+// shown in the app is the book's own depth imbalance — bid notional
+// vs ask notional within ±2% of mid, the real per-market pressure
+// reading the public API supports. Cached 20s per coin; a stale
+// entry beats an error.
+const hlSkewCache = new Map<string, { at: number; data: any }>();
+const hlSkewInflight = new Map<string, Promise<any>>();
+// One upstream l2Book fetch per coin, shared by the single route and
+// the batch route below; fresh cache 20s, a stale copy beats an
+// error, and null means the coin has never produced a reading.
+function hlSkewFor(coin: string): Promise<any> {
+  const hit = hlSkewCache.get(coin);
+  if (hit && Date.now() - hit.at < 20000) return Promise.resolve(hit.data);
+  const flying = hlSkewInflight.get(coin);
+  if (flying) return hit ? Promise.resolve(hit.data) : flying;
+  const p = (async () => {
+    try {
+      const book = await hlPost({ type: 'l2Book', coin });
+      const bids = (book?.levels?.[0] || []) as any[];
+      const asks = (book?.levels?.[1] || []) as any[];
+      const bestBid = parseFloat(bids[0]?.px || '0'); const bestAsk = parseFloat(asks[0]?.px || '0');
+      if (!(bestBid > 0) || !(bestAsk > 0)) throw new Error('empty book');
+      const mid = (bestBid + bestAsk) / 2;
+      const ntl = (lvls: any[], keep: (px: number) => boolean): number => lvls.reduce((s, l) => { const px = parseFloat(l.px || '0'); const sz = parseFloat(l.sz || '0'); return keep(px) && px > 0 && sz > 0 ? s + px * sz : s; }, 0);
+      const bidNtl = ntl(bids, px => px >= mid * 0.98);
+      const askNtl = ntl(asks, px => px <= mid * 1.02);
+      if (!(bidNtl + askNtl > 0)) throw new Error('no depth in band');
+      const data = { coin, longPct: Math.round(100 * bidNtl / (bidNtl + askNtl)), mid };
+      cacheSet(hlSkewCache, coin, { at: Date.now(), data }, 300);
+      return data;
+    } catch {
+      if (hit) return hit.data;
+      return null;
+    }
+  })();
+  hlSkewInflight.set(coin, p);
+  void p.then(() => hlSkewInflight.delete(coin), () => hlSkewInflight.delete(coin));
+  // Stale-while-revalidate (2026-11-24): same contract as candles —
+  // an expired reading answers instantly, the refresh lands behind it.
+  if (hit) return Promise.resolve(hit.data);
+  return p;
+}
+app.get('/api/hl/skew', rateLimit(120, 'hl-skew'), async (req, res) => {
+  const coin = String(req.query.coin || '');
+  if (!/^[A-Za-z0-9:._-]{1,32}$/.test(coin)) { res.status(400).json({ error: 'bad skew request' }); return; }
+  const data = await hlSkewFor(coin);
+  if (data) { res.json(data); return; }
+  res.status(502).json({ error: 'hyperliquid unavailable' });
+});
+// ---- Batch list feeds (2026-11-24) ----
+// The Invest perp list used to fire TWO requests per card (candles +
+// skew); a phone scrolling the list blew the shared per-minute
+// bucket and both feeds starved at "—" while prices (one cached
+// call) loaded. The list now asks for every queued coin in ONE
+// request per feed. Upstream fetches run at gentle concurrency (the
+// public API throttles bursts) and share the per-coin caches with
+// the single routes; a coin with no reading yet comes back null and
+// the client retries it on the next 25s repaint.
+const HL_BATCH_MAX = 40;
+function hlBatchCoins(req: Request): string[] | null {
+  const coins = String(req.query.coins || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (!coins.length || coins.length > HL_BATCH_MAX) return null;
+  if (!coins.every(c => /^[A-Za-z0-9:._-]{1,32}$/.test(c))) return null;
+  return [...new Set(coins)];
+}
+async function hlPool<T>(items: string[], n: number, fn: (c: string) => Promise<T>): Promise<Map<string, T>> {
+  const out = new Map<string, T>();
+  let next = 0;
+  const workers = Array.from({ length: Math.min(n, items.length) }, async () => { while (next < items.length) { const c = items[next++]; out.set(c, await fn(c)); } });
+  await Promise.all(workers);
+  return out;
+}
+app.get('/api/hl/skews', rateLimit(240, 'hl-skews'), async (req, res) => {
+  const coins = hlBatchCoins(req);
+  if (!coins) { res.status(400).json({ error: 'bad skews request' }); return; }
+  const got = await hlPool(coins, 4, c => hlSkewFor(c));
+  const skews: Record<string, unknown> = {};
+  for (const c of coins) skews[c] = got.get(c) ?? null;
+  res.json({ skews });
+});
+app.get('/api/hl/sparklines', rateLimit(240, 'hl-sparklines'), async (req, res) => {
+  const coins = hlBatchCoins(req);
+  if (!coins) { res.status(400).json({ error: 'bad sparklines request' }); return; }
+  const got = await hlPool(coins, 4, async c => { try { const d = await hlCandlesFor(c, '1h', 24); return (d?.candles || []).map((k: any) => k.close).filter((v: number) => v > 0) as number[]; } catch { return null; } });
+  const sparks: Record<string, unknown> = {};
+  for (const c of coins) { const v = got.get(c); sparks[c] = Array.isArray(v) && v.length > 1 ? v : null; }
+  res.json({ sparks });
 });
 app.get('/api/hl/markets', async (_req, res) => {
   try { res.json(await hlMarkets()); } catch { res.status(502).json({ error: 'hyperliquid unavailable' }); }
@@ -1215,7 +1352,7 @@ app.get('/api/hl/account/:address', rateLimit(60), async (req, res) => {
 // verbatim and returns the upstream response verbatim: the server
 // holds no keys, signs nothing, and does not log payloads.
 const HL_INFO_TYPES = new Set(['clearinghouseState', 'spotClearinghouseState', 'openOrders', 'frontendOpenOrders', 'allMids', 'metaAndAssetCtxs', 'spotMetaAndAssetCtxs', 'perpDexs', 'l2Book', 'candleSnapshot', 'userFills', 'userFillsByTime', 'userRole', 'portfolio', 'fundingHistory', 'userFunding', 'delegations', 'userFees']);
-app.post('/api/hl/info', rateLimit(120), async (req, res) => {
+app.post('/api/hl/info', rateLimit(120, 'hl-info'), async (req, res) => {
   const body = req.body;
   if (!body || typeof body !== 'object' || typeof body.type !== 'string' || !HL_INFO_TYPES.has(body.type)) { res.status(400).json({ error: 'unsupported info query' }); return; }
   if (body.user !== undefined && (typeof body.user !== 'string' || !/^0x[0-9a-fA-F]{40}$/.test(body.user))) { res.status(400).json({ error: 'bad user address' }); return; }
@@ -1244,7 +1381,7 @@ function isPlausibleAddress(s: unknown): boolean {
   return typeof s === 'string' && (/^0x[0-9a-fA-F]{40}$/.test(s) || /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(s));
 }
 const gtCache = new Map<string, { at: number; data: unknown }>();
-app.get('/api/gt/trending/:chain', rateLimit(120), async (req, res) => {
+app.get('/api/gt/trending/:chain', rateLimit(120, 'gt-trending'), async (req, res) => {
   const net = GT_NETWORKS[String(req.params.chain || '')];
   if (!net) { res.status(400).json({ error: 'unsupported network' }); return; }
   const hit = gtCache.get(net);
@@ -1448,6 +1585,312 @@ app.get('/api/bstocks', async (_req, res) => {
   finally { if (bsBuilding) bsBuilding.catch(() => {}).finally(() => { bsBuilding = null; }); }
 });
 
+// ---- DEX prices for tokens no index carries ----
+// The client's price pipeline resolves CoinGecko ids first and Trust
+// Wallet index entries second. Tokens the owner BOUGHT or added by
+// contract — bStocks, Invest discoveries, swap outputs — are created
+// with no CoinGecko id, and TW's index does not carry them either
+// (verified live 2026-11-23: its tickers answer {} for NVDAB), so
+// their holding rows sat at "Price unavailable" forever despite live
+// DEX liquidity. This endpoint is the general fallback: price by
+// chain + contract from DexScreener, the same source that prices the
+// bStocks list above. A pair only counts when it sits on the asked
+// chain AND its base token IS the asked contract (copycat pairs can
+// never price a holding); the deepest-liquidity pair wins. Results
+// (including honest nulls for pair-less tokens) cache for 60s in a
+// bounded map — the set of asked tokens is small and owner-driven.
+const DEX_CHAIN_IDS: Record<string, string> = {
+  ethereum: 'ethereum', bnb: 'bsc', polygon: 'polygon', arbitrum: 'arbitrum',
+  base: 'base', optimism: 'optimism', avalanche: 'avalanche', fantom: 'fantom',
+  zksync: 'zksync', solana: 'solana', 'solana-tw': 'solana', 'solana-phantom': 'solana',
+};
+interface DexPriceEntry { usd: number; change24h: number | null; marketCap: number | null; volume24h: number | null }
+const dexPriceCache = new Map<string, { at: number; entry: DexPriceEntry | null }>();
+// The winning pair's address, recorded whenever a price lookup picks
+// one — the DEX OHLC endpoint below charts THAT pool, so the history
+// always belongs to the same market the spot price came from.
+const dexPairCache = new Map<string, { at: number; pair: string | null }>();
+async function dexPriceFor(chainId: string, contract: string): Promise<DexPriceEntry | null> {
+  const dexChain = DEX_CHAIN_IDS[chainId];
+  if (!dexChain) return null;
+  const key = chainId + ':' + contract.toLowerCase();
+  const hit = dexPriceCache.get(key);
+  if (hit && Date.now() - hit.at < 60000) return hit.entry;
+  let entry: DexPriceEntry | null = null;
+  let pair: string | null = null;
+  try {
+    const r = await fetch('https://api.dexscreener.com/latest/dex/tokens/' + encodeURIComponent(contract), { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(8000) });
+    if (r.ok) {
+      const j: any = await r.json();
+      const pairs = (j.pairs || []).filter((p: any) => p.chainId === dexChain && (p.baseToken?.address || '').toLowerCase() === contract.toLowerCase());
+      pairs.sort((a: any, b: any) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0));
+      const p = pairs[0];
+      if (p) {
+        if (typeof p.pairAddress === 'string' && p.pairAddress) pair = p.pairAddress;
+        const usd = parseFloat(p.priceUsd || '0');
+        if (Number.isFinite(usd) && usd > 0) entry = { usd, change24h: typeof p.priceChange?.h24 === 'number' ? p.priceChange.h24 : null, marketCap: typeof p.marketCap === 'number' ? p.marketCap : (typeof p.fdv === 'number' ? p.fdv : null), volume24h: typeof p.volume?.h24 === 'number' ? p.volume.h24 : null };
+      }
+    }
+  } catch { /* a failed lookup caches as null for the same 60s — no retry storm */ }
+  dexPriceCache.set(key, { at: Date.now(), entry });
+  dexPairCache.set(key, { at: Date.now(), pair });
+  if (dexPriceCache.size > 500) { const sorted = [...dexPriceCache.entries()].sort((a, b) => a[1].at - b[1].at); for (const [k] of sorted.slice(0, dexPriceCache.size - 500)) dexPriceCache.delete(k); }
+  if (dexPairCache.size > 500) { const sorted = [...dexPairCache.entries()].sort((a, b) => a[1].at - b[1].at); for (const [k] of sorted.slice(0, dexPairCache.size - 500)) dexPairCache.delete(k); }
+  return entry;
+}
+/** Deepest-liquidity pair address for a DEX-priced token, or null. */
+async function dexPairFor(chainId: string, contract: string): Promise<string | null> {
+  const key = chainId + ':' + contract.toLowerCase();
+  const hit = dexPairCache.get(key);
+  if (hit && Date.now() - hit.at < 60000) return hit.pair;
+  await dexPriceFor(chainId, contract); // populates the pair cache as a side effect
+  return dexPairCache.get(key)?.pair ?? null;
+}
+app.post('/api/dex/prices', rateLimit(60), async (req, res) => {
+  const list = Array.isArray(req.body?.tokens) ? req.body.tokens : [];
+  const want: { chain: string; contract: string }[] = [];
+  const seen = new Set<string>();
+  for (const it of list.slice(0, 30)) {
+    const chain = typeof it?.chain === 'string' ? it.chain : '';
+    const contract = typeof it?.contract === 'string' ? it.contract.trim() : '';
+    if (!DEX_CHAIN_IDS[chain]) continue;
+    if (!(/^0x[0-9a-fA-F]{40}$/.test(contract) || /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(contract))) continue;
+    const k = chain + ':' + contract.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    want.push({ chain, contract });
+  }
+  const out: Record<string, DexPriceEntry> = {};
+  let next = 0;
+  const worker = async () => { while (next < want.length) { const w = want[next++]; const e = await dexPriceFor(w.chain, w.contract); if (e) out[w.chain + ':' + w.contract.toLowerCase()] = e; } };
+  await Promise.all(Array.from({ length: Math.min(6, Math.max(want.length, 1)) }, worker));
+  res.json({ prices: out, at: Date.now() });
+});
+
+// ---- DEX OHLC for tokens no index carries ----
+// The detail chart's candle source for the same tokens /api/dex/prices
+// prices. Two real-history sources, in order:
+//   1. If CoinGecko lists the token as a coin (many do — every bStock
+//      is CG-listed; the client TokenDef just doesn't carry the id),
+//      resolve chain+contract -> CG id via CG's contract endpoint
+//      (cached 24h) and serve the SAME candles as /api/ohlc. This
+//      path exists because GeckoTerminal's free tier hard-rate-limits
+//      this box's IP (429s even at wide spacing, verified live
+//      2026-11-23) while the standard CG API — same data, the box's
+//      healthy quota — serves these coins fine.
+//   2. GeckoTerminal OHLCV for the token's deepest pool (the pair
+//      dexPriceFor picked), for tokens only GT carries.
+// Granularity mirrors /api/ohlc exactly — 1d as
+// hourly candles, 7d/30d as 4h candles, 365d as daily candles — so the
+// client's existing bucketing (hour/day/week/month) produces the same
+// Day/Week/Month/Year periods as the CoinGecko path. Volumes arrive in
+// USD and are converted to coin units with each candle's close, the
+// same honest estimate /api/ohlc makes. GeckoTerminal's free tier is
+// ~30 calls/min, so results cache 5 minutes per pool+range in a
+// bounded map with in-flight coalescing, a stale copy is served when
+// the upstream fails, and the upstream calls themselves pass through
+// a serial pacing gate with 429 backoff (see gtCall below). A pool
+// younger than the range simply returns fewer candles — history is
+// never padded or invented.
+const GT_NET_BY_DEX: Record<string, string> = {
+  ethereum: 'eth', bsc: 'bsc', polygon: 'polygon_pos', arbitrum: 'arbitrum',
+  base: 'base', optimism: 'optimism', avalanche: 'avax', fantom: 'fantom',
+  zksync: 'zksync', solana: 'solana',
+};
+// CoinGecko asset-platform ids per wallet chain, for the contract ->
+// coin-id lookup (CG's own naming, not the DexScreener/GT one).
+const CG_PLATFORM_BY_CHAIN: Record<string, string> = {
+  ethereum: 'ethereum', bnb: 'binance-smart-chain', polygon: 'polygon-pos', arbitrum: 'arbitrum-one',
+  base: 'base', optimism: 'optimistic-ethereum', avalanche: 'avalanche', fantom: 'fantom',
+  zksync: 'zksync', solana: 'solana', 'solana-tw': 'solana', 'solana-phantom': 'solana',
+};
+const cgIdCache = new Map<string, { at: number; id: string | null }>();
+/** CoinGecko coin id for a chain+contract token, or null when CG does
+ * not list it (or the lookup failed transiently — only a definitive
+ * 404 is cached as a miss, for 24h, in a bounded map). */
+async function cgIdForToken(chainId: string, contract: string): Promise<string | null> {
+  const platform = CG_PLATFORM_BY_CHAIN[chainId];
+  if (!platform) return null;
+  const key = chainId + ':' + contract.toLowerCase();
+  const hit = cgIdCache.get(key);
+  if (hit && Date.now() - hit.at < 86400000) return hit.id;
+  let id: string | null = null;
+  let definitive = false;
+  try {
+    const j = await cgFetch(`https://api.coingecko.com/api/v3/coins/${platform}/contract/${encodeURIComponent(contract)}`);
+    if (j && typeof j.id === 'string' && /^[a-z0-9-]{2,60}$/.test(j.id)) { id = j.id; definitive = true; }
+  } catch (e) { if (e instanceof CgError && e.status === 404) definitive = true; }
+  if (definitive) {
+    cgIdCache.set(key, { at: Date.now(), id });
+    if (cgIdCache.size > 500) { const sorted = [...cgIdCache.entries()].sort((a, b) => a[1].at - b[1].at); for (const [k] of sorted.slice(0, cgIdCache.size - 500)) cgIdCache.delete(k); }
+  }
+  return id;
+}
+const dexOhlcCache = new Map<string, { at: number; data: unknown }>();
+const dexOhlcInflight = new Map<string, Promise<unknown>>();
+let gtDexCooldownUntil = 0;
+// GeckoTerminal's free tier is ~30 calls/min and this box's quota is
+// visibly contended (429s in bursts even at 20s spacing, shared with
+// the Invest trending polls). DEX-OHLC calls therefore pass through a
+// serial gate — one call at a time, spaced — and a 429 retries with
+// backoff (3s/6s/12s) inside the fetch: a cold chart open waits a few
+// seconds in the loader instead of failing, and once a range lands it
+// is cached for 5 minutes, so the pacing cost is paid once per token.
+let gtGate: Promise<unknown> = Promise.resolve();
+let gtLastCallAt = 0;
+function gtCall<T>(fn: () => Promise<T>): Promise<T> {
+  const run = async (): Promise<T> => {
+    const wait = gtLastCallAt + 2200 - Date.now();
+    if (wait > 0) await new Promise(r => setTimeout(r, wait));
+    gtLastCallAt = Date.now();
+    return fn();
+  };
+  const p = gtGate.then(run, run);
+  gtGate = p.then(() => undefined, () => undefined);
+  return p;
+}
+async function dexOhlcFetch(chainId: string, contract: string, days: string): Promise<unknown> {
+  const pair = await dexPairFor(chainId, contract);
+  if (!pair) return { chain: chainId, days: Number(days), candles: [], at: Date.now() };
+  const gtNet = GT_NET_BY_DEX[DEX_CHAIN_IDS[chainId]];
+  const [tf, agg, limit] = days === '1' ? ['hour', 1, 24] : days === '7' ? ['hour', 4, 42] : days === '30' ? ['hour', 4, 180] : ['day', 1, 365];
+  const url = `https://api.geckoterminal.com/api/v2/networks/${gtNet}/pools/${pair}/ohlcv/${tf}?aggregate=${agg}&limit=${limit}&currency=usd`;
+  let r: Awaited<ReturnType<typeof fetch>> | null = null;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (attempt > 0) await new Promise(res => setTimeout(res, attempt * 3000));
+    r = await gtCall(() => fetch(url, { headers: { Accept: 'application/json;version=20230302' }, signal: AbortSignal.timeout(10000) }));
+    if (r.ok) break;
+    if (r.status !== 429) break; // a non-429 failure will not heal by waiting
+  }
+  if (!r || !r.ok) { if (r?.status === 429) gtDexCooldownUntil = Date.now() + 60000; throw new Error('geckoterminal ' + (r?.status ?? 'unreachable')); }
+  const j: any = await r.json();
+  const list: any[] = j?.data?.attributes?.ohlcv_list || [];
+  const candles = list
+    .map((c: any) => { const t = Number(c[0]) * 1000, o = Number(c[1]), h = Number(c[2]), l = Number(c[3]), cl = Number(c[4]), vUsd = Number(c[5]); return [t, o, h, l, cl, cl > 0 && Number.isFinite(vUsd) ? vUsd / cl : 0]; })
+    .filter((c: number[]) => c[4] > 0)
+    .sort((a: number[], b: number[]) => a[0] - b[0]);
+  return { chain: chainId, days: Number(days), candles, at: Date.now() };
+}
+app.get('/api/dex/ohlc', rateLimit(60), async (req, res) => {
+  const chain = String(req.query.chain || '');
+  const contract = String(req.query.contract || '').trim();
+  const days = ['1', '7', '30', '365'].includes(String(req.query.days)) ? String(req.query.days) : '7';
+  if (!DEX_CHAIN_IDS[chain] || !GT_NET_BY_DEX[DEX_CHAIN_IDS[chain]] || !(/^0x[0-9a-fA-F]{40}$/.test(contract) || /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(contract))) { res.status(400).json({ error: 'bad token' }); return; }
+  const key = chain + ':' + contract.toLowerCase() + ':' + days;
+  const hit = dexOhlcCache.get(key);
+  if (hit && Date.now() - hit.at < 300000) { res.json(hit.data); return; }
+  try {
+    // Source 1: the token's CoinGecko coin candles, when CG lists it.
+    const cgId = await cgIdForToken(chain, contract);
+    if (cgId) {
+      try {
+        const { data } = await cgOhlcData(cgId, days);
+        if (data && Array.isArray(data.candles) && data.candles.length) {
+          dexOhlcCache.set(key, { at: Date.now(), data });
+          res.json(data);
+          return;
+        }
+      } catch { /* CG had the coin but no candles — fall through to the pool history */ }
+    }
+    // Source 2: GeckoTerminal OHLCV for the deepest pool.
+    let p = dexOhlcInflight.get(key);
+    if (!p) {
+      p = dexOhlcFetch(chain, contract, days);
+      dexOhlcInflight.set(key, p);
+      // Cleanup on settle via then(done, done) — NOT p.finally():
+      // a finally-derived promise re-rejects unobserved when p fails,
+      // and an unhandled rejection kills the whole server process
+      // (observed live 2026-11-23: a GT 429 crashed syn-wallet).
+      const done = () => { if (dexOhlcInflight.get(key) === p) dexOhlcInflight.delete(key); };
+      void p.then(done, done);
+    }
+    const data = await p;
+    dexOhlcCache.set(key, { at: Date.now(), data });
+    if (dexOhlcCache.size > 200) { const sorted = [...dexOhlcCache.entries()].sort((a, b) => a[1].at - b[1].at); for (const [k] of sorted.slice(0, dexOhlcCache.size - 200)) dexOhlcCache.delete(k); }
+    res.json(data);
+  } catch { if (hit) { res.json(hit.data); return; } res.status(502).json({ error: 'dex ohlc unavailable' }); }
+});
+
+// ---- Token logos for tokens no shipped file covers ----
+// Built-in and catalog tokens ship self-hosted logo files; anything
+// the owner bought or added by contract (bStocks, Invest discoveries,
+// swap outputs) has no file, so its rows fell back to the monogram.
+// This endpoint resolves the token's real artwork server-side — the
+// browser only ever talks to this origin, no third-party host ever
+// learns which tokens a wallet holds — from, in order:
+//   1. the Trust Wallet assets repository (the same source this app's
+//      shipped logos were fetched from at build time), by EIP-55
+//      checksummed contract / Solana mint;
+//   2. GeckoTerminal's token info image (CoinGecko-hosted artwork).
+// Bytes are validated as a raster image and bounded, then cached in a
+// bounded in-memory map (positives 24h, honest misses 10min) and
+// served with a long browser cache. A miss is a plain 404: the
+// client's icon renderer drops the <img> and the monogram shows —
+// exactly the pre-existing no-logo state.
+const TW_LOGO_CHAINS: Record<string, string> = {
+  ethereum: 'ethereum', bnb: 'smartchain', polygon: 'polygon', arbitrum: 'arbitrum',
+  base: 'base', optimism: 'optimism', avalanche: 'avalanchec', fantom: 'fantom',
+  zksync: 'zksyncera', solana: 'solana', 'solana-tw': 'solana', 'solana-phantom': 'solana',
+};
+const LOGO_CTYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+interface LogoEntry { at: number; body: Buffer | null; ctype: string }
+const logoCache = new Map<string, LogoEntry>();
+function eip55(addr: string): string {
+  const lower = addr.toLowerCase().replace(/^0x/, '');
+  const hash = Buffer.from(keccak_256(new TextEncoder().encode(lower))).toString('hex');
+  let out = '0x';
+  for (let i = 0; i < lower.length; i++) out += parseInt(hash[i], 16) >= 8 ? lower[i].toUpperCase() : lower[i];
+  return out;
+}
+async function fetchLogoImage(url: string): Promise<{ body: Buffer; ctype: string } | null> {
+  try {
+    const r = await fetch(url, { headers: { Accept: 'image/*' }, signal: AbortSignal.timeout(8000), redirect: 'follow' });
+    if (!r.ok) return null;
+    const ctype = (r.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+    if (!LOGO_CTYPES.has(ctype)) return null;
+    const buf = Buffer.from(await r.arrayBuffer());
+    if (buf.length < 50 || buf.length > 1000000) return null;
+    return { body: buf, ctype };
+  } catch { return null; }
+}
+async function resolveTokenLogo(chainId: string, contract: string): Promise<{ body: Buffer; ctype: string } | null> {
+  const tw = TW_LOGO_CHAINS[chainId];
+  if (tw) {
+    const addr = contract.startsWith('0x') ? eip55(contract) : contract;
+    const hit = await fetchLogoImage(`https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/${tw}/assets/${addr}/logo.png`);
+    if (hit) return hit;
+  }
+  const gtNet = GT_NET_BY_DEX[DEX_CHAIN_IDS[chainId] || ''];
+  if (gtNet && Date.now() >= gtDexCooldownUntil) {
+    try {
+      const r = await fetch(`https://api.geckoterminal.com/api/v2/networks/${gtNet}/tokens/${encodeURIComponent(contract)}`, { headers: { Accept: 'application/json;version=20230302' }, signal: AbortSignal.timeout(8000) });
+      if (r.status === 429) gtDexCooldownUntil = Date.now() + 60000;
+      if (r.ok) {
+        const j: any = await r.json();
+        const img = j?.data?.attributes?.image_url;
+        if (typeof img === 'string' && /^https:\/\//i.test(img) && !/["'\s<>]/.test(img)) { const hit = await fetchLogoImage(img); if (hit) return hit; }
+      }
+    } catch { /* fall through to the honest miss */ }
+  }
+  return null;
+}
+app.get('/api/token-logo', rateLimit(120, 'token-logo'), async (req, res) => {
+  const chain = String(req.query.chain || '');
+  const contract = String(req.query.contract || '').trim();
+  if (!TW_LOGO_CHAINS[chain] || !(/^0x[0-9a-fA-F]{40}$/.test(contract) || /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(contract))) { res.status(400).json({ error: 'bad token' }); return; }
+  const key = chain + ':' + contract.toLowerCase();
+  const hit = logoCache.get(key);
+  if (hit && Date.now() - hit.at < (hit.body ? 86400000 : 600000)) {
+    if (!hit.body) { res.status(404).json({ error: 'no logo' }); return; }
+    res.setHeader('Content-Type', hit.ctype); res.setHeader('Cache-Control', 'public, max-age=86400'); res.send(hit.body); return;
+  }
+  const found = await resolveTokenLogo(chain, contract);
+  logoCache.set(key, { at: Date.now(), body: found?.body ?? null, ctype: found?.ctype || '' });
+  if (logoCache.size > 300) { const sorted = [...logoCache.entries()].sort((a, b) => a[1].at - b[1].at); for (const [k] of sorted.slice(0, logoCache.size - 300)) logoCache.delete(k); }
+  if (!found) { res.setHeader('Cache-Control', 'public, max-age=600'); res.status(404).json({ error: 'no logo' }); return; }
+  res.setHeader('Content-Type', found.ctype); res.setHeader('Cache-Control', 'public, max-age=86400'); res.send(found.body);
+});
+
 // ---- Polymarket (Invest → Prediction) ----
 // Data path: the client reads Gamma + CLOB REST directly first (both
 // are public and CORS-open) and falls back to these proxies when a
@@ -1466,34 +1909,87 @@ function cacheSet<K, V>(map: Map<K, V>, key: K, val: V, max: number) {
   map.set(key, val);
 }
 const polyCache = new Map<string, { at: number; body: string; status: number }>();
-async function polyProxy(res: Response, cacheKey: string, url: string, ttlMs: number) {
+const polyRefreshInflight = new Set<string>();
+// Stale-while-revalidate (2026-11-24): the gamma browse body is
+// megabytes even after slimming, and a cold upstream fetch + parse
+// on this box can take seconds. A phone on a carrier link must
+// never wait for that chain when a previous answer exists: an
+// expired hit is served instantly and refreshed in the background
+// (deduped per key); only a never-fetched key pays the cold fetch.
+async function polyFetchAndCache(cacheKey: string, url: string, opts?: { cap?: number; transform?: (body: string) => string }): Promise<{ body: string; status: number }> {
+  const r = await fetch(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(10000) });
+  const raw = await readBodyCapped(r, opts?.cap);
+  const body = opts?.transform ? opts.transform(raw) : raw;
+  if (r.ok) cacheSet(polyCache, cacheKey, { at: Date.now(), body, status: r.status }, 400);
+  return { body, status: r.status };
+}
+async function polyProxy(res: Response, cacheKey: string, url: string, ttlMs: number, opts?: { cap?: number; transform?: (body: string) => string }) {
   const hit = polyCache.get(cacheKey);
   if (hit && Date.now() - hit.at < ttlMs) { res.status(hit.status).type('json').send(hit.body); return; }
+  if (hit) {
+    // Expired but present: serve stale now, refresh behind it.
+    res.status(hit.status).type('json').send(hit.body);
+    if (!polyRefreshInflight.has(cacheKey)) {
+      polyRefreshInflight.add(cacheKey);
+      void polyFetchAndCache(cacheKey, url, opts).catch(() => { /* stale copy already served; next request retries */ }).finally(() => polyRefreshInflight.delete(cacheKey));
+    }
+    return;
+  }
   try {
-    const r = await fetch(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(10000) });
-    const body = await readBodyCapped(r);
-    if (r.ok) cacheSet(polyCache, cacheKey, { at: Date.now(), body, status: r.status }, 400);
-    res.status(r.status).type('json').send(body);
-  } catch { if (hit) { res.status(hit.status).type('json').send(hit.body); return; } res.status(502).json({ error: 'polymarket upstream unavailable' }); }
+    const { body, status } = await polyFetchAndCache(cacheKey, url, opts);
+    res.status(status).type('json').send(body);
+  } catch { res.status(502).json({ error: 'polymarket upstream unavailable' }); }
+}
+// Gamma list payloads outgrew the 16 MB proxy cap (sports events
+// carry 300-500 markets each, full descriptions included — the
+// 24-event browse reached ~19.5 MB in 2026-11), so readBodyCapped
+// threw and the Prediction panel reported Polymarket "unreachable"
+// while every other gamma read (slug/condition lookups are small)
+// kept working. The client parses a fixed field set (parseEvent /
+// parseMarket in client/lib/polymarket.ts), so the gamma route now
+// strips everything else server-side before caching/sending, and
+// reads upstream with a higher — still bounded — cap sized for
+// this one known public dataset. Slimmed browse: ~4.9 MB.
+const GAMMA_MARKET_FIELDS = ['id', 'question', 'conditionId', 'slug', 'outcomes', 'outcomePrices', 'clobTokenIds', 'volume', 'volumeNum', 'volume24hr', 'liquidity', 'liquidityNum', 'endDate', 'negRisk', 'orderPriceMinTickSize', 'orderMinSize', 'closed', 'bestBid', 'bestAsk', 'lastTradePrice', 'spread', 'acceptingOrders', 'enableOrderBook', 'image', 'icon'];
+const GAMMA_EVENT_FIELDS = ['id', 'title', 'slug', 'volume', 'volume24hr', 'liquidity', 'endDate', 'image', 'icon'];
+function pickGammaFields(src: any, fields: string[]): any {
+  const o: Record<string, unknown> = {};
+  if (src && typeof src === 'object') for (const f of fields) if (f in src) o[f] = src[f];
+  return o;
+}
+function slimGammaBody(body: string): string {
+  try {
+    const j = JSON.parse(body);
+    const slimMarket = (m: any) => pickGammaFields(m, GAMMA_MARKET_FIELDS);
+    const slimOne = (x: any): any => {
+      if (!x || typeof x !== 'object') return x;
+      if (Array.isArray(x.markets)) { const o = pickGammaFields(x, GAMMA_EVENT_FIELDS); o.markets = x.markets.map(slimMarket); if (Array.isArray(x.tags)) o.tags = x.tags; return o; }
+      if ('conditionId' in x || 'clobTokenIds' in x) return slimMarket(x);
+      return x;
+    };
+    if (Array.isArray(j)) return JSON.stringify(j.map(slimOne));
+    if (j && Array.isArray(j.events)) { j.events = j.events.map(slimOne); return JSON.stringify(j); }
+    return body;
+  } catch { return body; }
 }
 app.get('/api/poly/gamma', rateLimit(90), async (req, res) => {
   const p = String(req.query.path || '');
   if (!/^\/(events|markets|tags|series|sports|search|public-search)(\?|$)/.test(p) || p.includes('..') || p.length > 600) { res.status(400).json({ error: 'path not allowed' }); return; }
-  await polyProxy(res, 'g' + p, 'https://gamma-api.polymarket.com' + p, 15000);
+  await polyProxy(res, 'g' + p, 'https://gamma-api.polymarket.com' + p, 15000, { cap: 40 * 1024 * 1024, transform: slimGammaBody });
 });
 app.get('/api/poly/book', rateLimit(180), async (req, res) => {
   const tid = String(req.query.token_id || '');
   if (!/^\d{10,}$/.test(tid)) { res.status(400).json({ error: 'bad token_id' }); return; }
   await polyProxy(res, 'b' + tid, 'https://clob.polymarket.com/book?token_id=' + tid, 3000);
 });
-app.get('/api/poly/history', rateLimit(120), async (req, res) => {
+app.get('/api/poly/history', rateLimit(120, 'poly-history'), async (req, res) => {
   const tid = String(req.query.token_id || '');
   const interval = ['max', '1w', '1d', '6h', '1h'].includes(String(req.query.interval)) ? String(req.query.interval) : '1d';
   const fidelity = Math.min(60, Math.max(1, Number(req.query.fidelity) || 10));
   if (!/^\d{10,}$/.test(tid)) { res.status(400).json({ error: 'bad token_id' }); return; }
   await polyProxy(res, `h${tid}${interval}${fidelity}`, `https://clob.polymarket.com/prices-history?market=${tid}&interval=${interval}&fidelity=${fidelity}`, 20000);
 });
-app.get('/api/poly/trades', rateLimit(120), async (req, res) => {
+app.get('/api/poly/trades', rateLimit(120, 'poly-trades'), async (req, res) => {
   const cond = String(req.query.condition || '');
   if (!/^0x[0-9a-fA-F]{64}$/.test(cond)) { res.status(400).json({ error: 'bad condition' }); return; }
   const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 25));
@@ -2102,7 +2598,7 @@ async function fetchHistory(chainId: number, address: string, symbol: string, li
   }
   return { rows: rows.slice(0, limit), source: 'routescan' };
 }
-app.get('/api/history/:chainId', rateLimit(120), async (req, res) => {
+app.get('/api/history/:chainId', rateLimit(120, 'history'), async (req, res) => {
   const chainId = Number(req.params.chainId);
   const address = String(req.query.address || '');
   const symbolRaw = String(req.query.symbol || '');

@@ -10,7 +10,12 @@
 //    icon-map.ts) → no URL.
 //  - Tokens: built-ins ship a real logo under /assets/tokens/<id>.png
 //    (fetched from the Trust Wallet assets repo by checksummed contract /
-//    mint, verified on disk) → custom tokens have no obtainable logo.
+//    mint, verified on disk) → any other token WITH a contract on a
+//    covered chain resolves its real artwork through the server's
+//    /api/token-logo (which fetches + caches it from the same Trust
+//    Wallet repo, then GeckoTerminal's token info — the browser never
+//    talks to a third-party host) → a token with no artwork anywhere
+//    keeps the monogram.
 //
 // "No URL" is NOT a broken image: the renderer draws the fallback tile —
 // the symbol's letters as a chrome monogram on a #1a1f28 disc — and when
@@ -22,7 +27,7 @@ import { UNDERLYING_ICONS } from './underlying-icons';
 import { STOCK_ICONS } from './stock-icons';
 
 export interface IconChainLike { id: string; name: string; symbol: string; img?: string; evmId?: number }
-export interface IconTokenLike { id: string; symbol: string; name?: string; builtin?: boolean; logo?: boolean }
+export interface IconTokenLike { id: string; symbol: string; name?: string; builtin?: boolean; logo?: boolean; chainId?: string; contract?: string }
 
 const esc = (s: string) => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
 
@@ -33,14 +38,26 @@ export function chainIconUrl(c: IconChainLike): string {
   return '';
 }
 
-/** Self-hosted logo URL for a token, or '' when none exists (monogram). */
+// Chains whose tokens the server's /api/token-logo can resolve
+// artwork for (Trust Wallet repo path and/or GeckoTerminal network
+// exists). Mirrors TW_LOGO_CHAINS in src/server.ts.
+const TOKEN_LOGO_CHAINS: Record<string, true> = { ethereum: true, bnb: true, polygon: true, arbitrum: true, base: true, optimism: true, avalanche: true, fantom: true, zksync: true, solana: true, 'solana-tw': true, 'solana-phantom': true };
+
+/** Logo URL for a token, or '' when none exists (monogram). */
 export function tokenIconUrl(t: IconTokenLike): string {
   // Built-ins and catalog tokens carry a self-hosted logo file at
   // /assets/tokens/<id>.png (catalog entries are flagged logo:true
   // only when their file was actually fetched — and a missing file
   // still degrades safely: the global error handler removes a broken
   // .coinImg, revealing the monogram).
-  return t.builtin || t.logo ? `/assets/tokens/${t.id}.png` : '';
+  if (t.builtin || t.logo) return `/assets/tokens/${t.id}.png`;
+  // Any other token with a real contract on a covered chain — bStocks,
+  // Invest discoveries, swap outputs, hand-added tokens — resolves its
+  // real logo through the server (same-origin; the server fetches and
+  // caches the artwork). A 404 degrades exactly like a missing file:
+  // the <img> is removed and the monogram shows.
+  if (t.chainId && t.contract && t.contract !== 'native' && TOKEN_LOGO_CHAINS[t.chainId]) return `/api/token-logo?chain=${encodeURIComponent(t.chainId)}&contract=${encodeURIComponent(t.contract)}`;
+  return '';
 }
 
 export interface IconOpts { lg?: boolean; sm?: boolean; tick?: boolean }

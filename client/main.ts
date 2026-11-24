@@ -14,8 +14,8 @@ import { computePresets, computeLegacyPresets, parseGwei, formatGwei, validateCu
 import { gpTokenRisk, gpAddressRisk, gpApprovals, isUnlimitedAmount, formatTokenAmount, extractSolMintRisks, type RiskReport, type ApprovalRow } from './lib/goplus';
 import { twAssetId, twCoinRisk, twAddressVerdict, twTickers as twTickersFetch, setTwEnabled, twEnabled } from './lib/twapi';
 import { renderTickerChart, fmtUsd, fmtPrice, priceDp } from './lib/chart';
-import { CURRENCIES, currencyCode, currencySymbol, convertUsd, setCurrency, fetchFxRates, fxRateFor, effectiveCode, currencyDecimals } from './lib/currency';
-import { chainIcon, tokenIcon, chainIconUrl, tokenIconUrl, iconHTML, stackIconHTML, underlyingIcon, underlyingIconUrl, commodityIcon, stockIcon } from './lib/icons';
+import { CURRENCIES, currencyCode, currencySymbol, convertUsd, setCurrency, fetchFxRates, fxRateFor, effectiveCode, currencyDecimals, renderFiat } from './lib/currency';
+import { chainIcon, tokenIcon, chainIconUrl, tokenIconUrl, iconHTML, stackIconHTML, underlyingIcon, underlyingIconUrl, commodityIcon, stockIcon, stockIconUrl } from './lib/icons';
 import { TOKEN_CATALOG, POPULAR_TOKEN_IDS } from './lib/token-catalog';
 import { gammaEvents, gammaEventBySlug, gammaMarketByCondition, upDownSlug, parseUpDownSlug, UPDOWN_ASSETS, UPDOWN_TFS, clobBook, clobHistory, polyPositions, polyTrades, polyFeed, deriveClobCreds, buildSignedOrder, postOrder, getOpenOrders, cancelPolyOrder, verifyOrderSignature, limitRawAmounts, marketRawAmounts, walkPrice, roundConfigFor, relayerDeployed, CTF_EXCHANGE_V2, NEG_RISK_EXCHANGE_V2, PUSD, USDC_E, USDC_NATIVE, type PolyEvent, type PolyMarket, type PolyPosition, type PolyOpenOrder, type ClobCreds, type Book } from './lib/polymarket';
 import { hlInfo, hlPostL1, hlApproveAgent, hlOrderWire, hlOrderAction, hlUpdateLeverageAction, hlCancelAction, hlOrderStatusLines, hlAssetId, hlRoundPrice, hlRoundSize, hlEstLiqPx, HL_BRIDGE_ADDRESS, HL_ARBITRUM_USDC, HL_MIN_DEPOSIT_USDC, HL_MIN_ORDER_USD, type HlOrderWire } from './lib/hl';
@@ -154,7 +154,7 @@ async function finishAddWallet(plain: string, m: Meta) {
   // persistPayload (vault v2 semantics); no password step was shown.
   returnFromFlow();
 }
-function clearAccountCaches() { balances = new Map(); activityCache = new Map(); tokenBalances = new Map(); paintedVals.clear(); lastBalanceAt = 0; hlAcct = null; hlAcctAt = 0; hlAcctAddr = ''; hlAcctFailed = false; }
+function clearAccountCaches() { balances = new Map(); activityCache = new Map(); tokenBalances = new Map(); paintedVals.clear(); lastBalanceAt = 0; hlAcct = null; hlAcctAt = 0; hlAcctAddr = ''; hlAcctFailed = false; actPosMem = null; }
 let appPassword: string | null = null;
 function activeWallet(): WalletEntry | null { if (!vaultPayload) return null; return vaultPayload.wallets.find(w => w.id === vaultPayload!.activeId) || vaultPayload.wallets[0] || null; }
 function accountIdx(): number { const w = activeWallet(); if (!w) return 0; return Math.max(0, Math.min(config.accountIndex[w.id] || 0, Math.max(0, w.accounts - 1))); }
@@ -274,6 +274,23 @@ function recordCounterparty(addr: string) {
   try { const all = loadCounterparties().filter(a => a !== addr); all.unshift(addr); localStorage.setItem(COUNTERPARTY_KEY, JSON.stringify(all.slice(0, 100))); } catch { /* storage unavailable */ }
 }
 const DATA_CACHE_KEY = 'syn-wallet-data-cache-v1';
+// Last good Prediction browse page, persisted with the data cache
+// (2026-11-24): public market data, account-independent like
+// prices. A cold start on a slow link paints this instantly and
+// refreshes behind it, instead of betting the whole panel on one
+// multi-megabyte fetch beating a timeout.
+let polyPersist: { key: string; events: PolyEvent[]; at: number } | null = null;
+// Last-known Activity Open Positions snapshot (owner report
+// 2026-11-24: the block hid and re-appeared on every tab switch).
+// showActivity rebuilds the view around an EMPTY #actPositions slot
+// and the old paint waited on two network reads before writing
+// anything, so the block vanished for the whole fetch and popped
+// back in. The snapshot follows the persisted-browse pattern: paint
+// last-known values instantly, refresh behind them, and keep the
+// snapshot in the data cache (account-gated there, like balances) so
+// even a cold start paints immediately. A read that is still in
+// flight — or that failed — is NEVER read as "no positions".
+let actPosMem: { key: string; poly: PolyPosition[]; perps: HlPosition[] } | null = null;
 function saveDataCache() {
   try {
     // Validator list + identities are public network data, cached so
@@ -281,7 +298,7 @@ function saveDataCache() {
     // on the next cold start instead of waiting on Solana reads.
     let valInfo: [string, { name: string; skip: number | null; icon: string }][] | undefined;
     if (validatorInfo && stakeValidators.length) { const keep = new Set(stakeValidators.map(v => v.votePubkey)); valInfo = [...validatorInfo.entries()].filter(([k]) => keep.has(k)); }
-    localStorage.setItem(DATA_CACHE_KEY, JSON.stringify({ prices, balances: Object.fromEntries(balances), activity: Object.fromEntries(activityCache), tokens: Object.fromEntries(tokenBalances), explore: exploreVals, promo: promoPolyCache, nfts: nftItems ? { items: nftItems.slice(0, 300), notes: nftNotes, forKey: nftForKey } : undefined, validators: stakeValidators.length ? stakeValidators.slice(0, 150) : undefined, valInfo, accKey: accKey(), at: Date.now() }));
+    localStorage.setItem(DATA_CACHE_KEY, JSON.stringify({ prices, balances: Object.fromEntries(balances), activity: Object.fromEntries(activityCache), tokens: Object.fromEntries(tokenBalances), explore: exploreVals, promo: promoPolyCache, polyBrowse: polyPersist || undefined, actPos: actPosMem && actPosMem.key === accKey() ? { poly: actPosMem.poly, perps: actPosMem.perps } : undefined, nfts: nftItems ? { items: nftItems.slice(0, 300), notes: nftNotes, forKey: nftForKey } : undefined, validators: stakeValidators.length ? stakeValidators.slice(0, 150) : undefined, valInfo, accKey: accKey(), at: Date.now() }));
   } catch { /* storage full/blocked */ }
 }
 let pendingCache: any = null;
@@ -289,6 +306,7 @@ function loadDataCache() {
   try {
     const j = JSON.parse(localStorage.getItem(DATA_CACHE_KEY) || 'null'); if (!j) return;
     if (j.prices) prices = j.prices; // prices are account-independent — safe to paint pre-unlock
+    if (j.polyBrowse && typeof j.polyBrowse.key === 'string' && Array.isArray(j.polyBrowse.events) && j.polyBrowse.events.length) polyPersist = { key: j.polyBrowse.key, events: j.polyBrowse.events, at: typeof j.polyBrowse.at === 'number' ? j.polyBrowse.at : 0 };
     if (Array.isArray(j.validators) && j.validators.length) { stakeValidators = j.validators.filter((v: any) => v && typeof v.votePubkey === 'string'); stakeValidatorsAt = typeof j.at === 'number' ? j.at : 0; }
     if (Array.isArray(j.valInfo) && j.valInfo.length) validatorInfo = new Map(j.valInfo);
     pendingCache = j;
@@ -311,6 +329,13 @@ function applyDataCache() {
     // background (the NFT restore is flagged stale so the warms and
     // the screen revalidate it once).
     if (pendingCache.promo && pendingCache.promo.q) promoPolyCache = pendingCache.promo;
+    // The Activity positions snapshot restores with the account's
+    // other data (this block only runs when the cache's accKey
+    // matches), so the Open Positions block paints instantly on the
+    // first Activity open of a cold start too, then refreshes behind.
+    if (pendingCache.actPos && Array.isArray(pendingCache.actPos.poly) && Array.isArray(pendingCache.actPos.perps)) {
+      actPosMem = { key: pendingCache.accKey, poly: pendingCache.actPos.poly, perps: pendingCache.actPos.perps };
+    }
     if (pendingCache.nfts && pendingCache.nfts.forKey === pendingCache.accKey && Array.isArray(pendingCache.nfts.items)) {
       nftItems = pendingCache.nfts.items; nftNotes = pendingCache.nfts.notes || []; nftForKey = pendingCache.nfts.forKey; nftStale = true;
     }
@@ -332,13 +357,41 @@ function priceStateOf(cgId: string | undefined): LoadState {
   if (prices?.[cgId]?.usd != null) return 'ok';
   return pricesSettled ? 'failed' : 'pending';
 }
-// Price entry for a token: CoinGecko-keyed first; tokens CoinGecko
-// does not carry fall back to the Trust Wallet index entry, stored in
-// the same map under the token's TW asset id (see fetchPrices).
+// DEX price fallback (DexScreener through /api/dex/prices): the last
+// price source, for tokens no index carries — anything the owner
+// bought or added by contract (bStocks, Invest discoveries, swap
+// outputs), which is created with no CoinGecko id and which the TW
+// index does not price either. Entries live in the same prices map
+// under a chain+contract key (see fetchPrices). Chains not listed
+// have no DEX source in the wallet — an honest absence, not an error.
+const DEX_PRICE_CHAINS: Record<string, true> = { ethereum: true, bnb: true, polygon: true, arbitrum: true, base: true, optimism: true, avalanche: true, fantom: true, zksync: true, solana: true, 'solana-tw': true, 'solana-phantom': true };
+function dexPriceKey(t: TokenDef): string | null {
+  if (!t.contract || t.contract === 'native') return null;
+  if (!DEX_PRICE_CHAINS[t.chainId]) return null;
+  return 'dex:' + t.chainId + ':' + t.contract.toLowerCase();
+}
+// Price entry for a token, in source order: CoinGecko id, Trust
+// Wallet index entry, DEX (chain+contract) entry — the first source
+// that actually has a USD price wins; when none does, the first
+// existing entry is returned so detail stats keep their shape.
 function priceEntry(t: TokenDef): any | null {
-  if (t.cg) return prices?.[t.cg] ?? null;
+  if (t.cg) { const e = prices?.[t.cg]; if (e?.usd != null) return e; }
   const a = twAssetId(t.chainId, t.contract);
-  return a ? (prices?.[a] ?? null) : null;
+  if (a) { const e = prices?.[a]; if (e?.usd != null) return e; }
+  const dk = dexPriceKey(t);
+  if (dk) { const e = prices?.[dk]; if (e?.usd != null) return e; }
+  if (t.cg) return prices?.[t.cg] ?? null;
+  if (a) return prices?.[a] ?? null;
+  if (dk) return prices?.[dk] ?? null;
+  return null;
+}
+// Load state for a token's price: 'ok' once ANY source prices it;
+// a token with no price source at all is honestly 'failed' from the
+// start, never pending.
+function tokenPriceState(t: TokenDef): LoadState {
+  if (priceEntry(t)?.usd != null) return 'ok';
+  if (!t.cg && !twAssetId(t.chainId, t.contract) && !dexPriceKey(t)) return 'failed';
+  return pricesSettled ? 'failed' : 'pending';
 }
 function tokenUsd(t: TokenDef): number | null { const e = priceEntry(t); return e?.usd ?? null; }
 function tokenChg(t: TokenDef): number | null { const e = priceEntry(t); return e?.change24h ?? null; }
@@ -606,8 +659,8 @@ function tokenGroups(): TokenGroup[] {
   return [...map.entries()].map(([key, members]) => ({ key, asset: key.startsWith('asset:') ? key.slice(6) : null, members, rep: members[0] }));
 }
 function groupOf(t: TokenDef): TokenGroup { const k = tokenGroupKey(t); return tokenGroups().find(g => g.key === k) || { key: k, asset: null, members: [t], rep: t }; }
-function groupPrice(g: TokenGroup): number | null { const cg = g.asset || g.rep.cg; return cg ? (prices?.[cg]?.usd ?? null) : null; }
-function groupChange(g: TokenGroup): number | null { const cg = g.asset || g.rep.cg; return cg ? (prices?.[cg]?.change24h ?? null) : null; }
+function groupPrice(g: TokenGroup): number | null { const cg = g.asset || g.rep.cg; if (cg && prices?.[cg]?.usd != null) return prices[cg].usd; if (!g.asset) return priceEntry(g.rep)?.usd ?? null; return null; }
+function groupChange(g: TokenGroup): number | null { const cg = g.asset || g.rep.cg; if (cg && prices?.[cg]?.usd != null) return prices[cg].change24h ?? null; if (!g.asset) return priceEntry(g.rep)?.change24h ?? null; return cg ? (prices?.[cg]?.change24h ?? null) : null; }
 function groupTotals(g: TokenGroup): { amount: number | null; fiat: number | null; pending: boolean; held: boolean } {
   let amount = 0; let any = false; let pending = false;
   for (const m of g.members) { const b = tokenBalances.get(m.id); if (b == null) { if (!tokenBalances.has(m.id)) pending = true; continue; } amount += b; any = true; }
@@ -1204,6 +1257,37 @@ async function fetchPrices() {
         }
       }
     }
+    // DEX prices (DexScreener through the server) for the tokens no
+    // index carries: anything bought or added by contract — bStocks,
+    // Invest discoveries, swap outputs. One batched call per round;
+    // entries land in the same map under the token's dex key, where
+    // priceEntry() finds them last. Held tokens go first (they are
+    // the rows the owner is looking at); the batch is capped like
+    // the TW round above.
+    {
+      const want: TokenDef[] = [];
+      for (const t of visibleTokens()) {
+        if (!dexPriceKey(t)) continue;
+        if (priceEntry(t)?.usd != null) continue;
+        want.push(t);
+      }
+      want.sort((a, b) => (tokenBalances.get(b.id) ?? 0) - (tokenBalances.get(a.id) ?? 0));
+      const batch = want.slice(0, 30);
+      if (batch.length) {
+        try {
+          const r = await fetch('/api/dex/prices', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ tokens: batch.map(t => ({ chain: t.chainId, contract: t.contract })) }), signal: AbortSignal.timeout(30000) });
+          if (r.ok) {
+            const j = await r.json();
+            const got = (j?.prices && typeof j.prices === 'object') ? j.prices : {};
+            for (const t of batch) {
+              const e = got[t.chainId + ':' + t.contract.toLowerCase()];
+              const dk = dexPriceKey(t);
+              if (e && dk) prices = { ...(prices || {}), [dk]: { usd: e.usd, change24h: e.change24h ?? undefined, marketCap: e.marketCap ?? undefined, volume24h: e.volume24h ?? undefined } };
+            }
+          }
+        } catch { /* a failed round keeps last prices for its tokens */ }
+      }
+    }
     saveDataCache();
   } catch { /* keep last */ }
   pricesSettled = true; // a full round completed — missing ids are now honestly "failed", not pending
@@ -1287,6 +1371,25 @@ async function fetchTokenBalanceDirect(t: TokenDef): Promise<number | null> {
   } catch { return null; }
 }
 async function refreshBalances() { lastBalanceAt = Date.now(); await fetchPrices(); await Promise.all(visibleChains().map(async c => balances.set(c.id, await fetchBalance(c)))); saveDataCache(); }
+// Post-action refresh: re-read exactly the balances an action touched,
+// immediately — never wait for the background cadence. The old pattern
+// DELETED the entries once the executor settled; the row then sat on
+// "Loading…", the Home total silently dropped the asset's whole value,
+// and saveDataCache persisted the hole until the next cadence round
+// refilled it (up to ~65 s later) — the "balances not updating" bug.
+// A targeted refetch lands the new values on every surface at once;
+// the periodic rounds still converge anything a chain confirms later.
+function refreshAfterAction(chains: (Chain | undefined)[] = [], tokens: (TokenDef | undefined)[] = []) {
+  const cs = chains.filter((c): c is Chain => !!c);
+  const ts = tokens.filter((t): t is TokenDef => !!t);
+  if (!cs.length && !ts.length) return;
+  void (async () => {
+    await Promise.all(cs.map(async c => balances.set(c.id, await fetchBalance(c))));
+    await Promise.all(ts.map(async t => tokenBalances.set(t.id, await fetchTokenBalance(t))));
+    saveDataCache();
+    paintLive();
+  })();
+}
 function totalUsd(): { total: number | null; partial: boolean } {
   let total = 0, any = false, partial = false;
   for (const c of visibleChains()) { const b = balances.get(c.id); const p = priceOf(c);
@@ -1884,7 +1987,7 @@ function tokenRowHTML(g: TokenGroup): string {
   const rep = g.rep;
   const tp = groupPrice(g); const ch = groupChange(g);
   const { amount, fiat, pending } = groupTotals(g);
-  const ps = priceStateOf(g.asset || rep.cg);
+  const ps = g.asset ? priceStateOf(g.asset) : tokenPriceState(rep);
   const multi = g.members.length > 1;
   const heldMembers = g.members.filter(m => (tokenBalances.get(m.id) ?? 0) > 0);
   const stackMembers = heldMembers.length ? heldMembers : g.members;
@@ -2017,8 +2120,8 @@ function paintHomeValues() {
       const tp = tokenUsd(t);
       const fiat = amount != null && tp != null ? amount * tp : null;
       flashSet(row.querySelector('[data-tok="usd"]'), 'tokusd:' + t.id, hideBal ? '••••' : fiat != null ? fmtUsd(fiat) : '—', hideBal ? null : fiat);
-      const cr = row.querySelector('[data-tok="crypto"]'); if (cr) cr.textContent = hideBal ? '' : amount == null ? (priceStateOf(t.cg) === 'pending' ? 'Loading…' : 'Unavailable') : fmtCrypto(amount, t.symbol);
-      const pr = row.querySelector('[data-tok="price"]'); if (pr) pr.textContent = tp != null ? fmtPrice(tp) : priceStateOf(t.cg) === 'pending' ? '…' : 'Price unavailable';
+      const cr = row.querySelector('[data-tok="crypto"]'); if (cr) cr.textContent = hideBal ? '' : amount == null ? (tokenPriceState(t) === 'pending' ? 'Loading…' : 'Unavailable') : fmtCrypto(amount, t.symbol);
+      const pr = row.querySelector('[data-tok="price"]'); if (pr) pr.textContent = tp != null ? fmtPrice(tp) : tokenPriceState(t) === 'pending' ? '…' : 'Price unavailable';
       const cgEl = row.querySelector('[data-tok="chg"]'); if (cgEl) { const ch = tokenChg(t); const html = ch != null ? `<span class="chgPill ${ch >= 0 ? 'pos' : 'neg'}">${ch >= 0 ? '+' : ''}${ch.toFixed(2)}%</span>` : ''; if (cgEl.innerHTML !== html) cgEl.innerHTML = html; }
     }
     // One list for natives + tokens, sorted by value — but the DOM
@@ -2265,6 +2368,37 @@ function paintChartCaption() {
   el.innerHTML = `${esc(p.name)} close <b>${fmtUsd(last.close, dec(last.close))}</b> · <span class="${chg >= 0 ? 'pos' : 'neg'}">${chg >= 0 ? '+' : '−'}${fmtUsd(Math.abs(chg), dec(chg))} (${Math.abs(pct).toFixed(1)}%)</span>`;
 }
 async function loadPriceChart(host: HTMLElement, cgId: string, onScrub: (info: ScrubInfo | null) => void) {
+  return runChartLoader(host, cgId, (days) => fetchOhlc(cgId, days), onScrub);
+}
+// DEX chart source: the same loader, fed by /api/dex/ohlc candles
+// (GeckoTerminal OHLCV for the token's deepest pool — the pool the
+// DEX price came from) under a chain+contract cache key. Used by the
+// token detail for tokens with no CoinGecko id (bStocks, added/bought
+// tokens); the CoinGecko path above is untouched.
+const dexOhlcInflight = new Map<string, Promise<OhlcCandle[] | null>>();
+function fetchDexOhlc(t: TokenDef, days: number): Promise<OhlcCandle[] | null> {
+  const key = 'dex:' + t.chainId + ':' + t.contract.toLowerCase() + ':' + days;
+  const hit = dexOhlcInflight.get(key);
+  if (hit) return hit;
+  const p = (async (): Promise<OhlcCandle[] | null> => {
+    try {
+      const r = await fetch(`/api/dex/ohlc?chain=${encodeURIComponent(t.chainId)}&contract=${encodeURIComponent(t.contract)}&days=${days}`);
+      if (!r.ok) return null;
+      const j = await r.json();
+      const rows: number[][] = Array.isArray(j.candles) ? j.candles : [];
+      if (!rows.length) return null;
+      return rows.map(a => ({ time: a[0], open: a[1], high: a[2], low: a[3], close: a[4], volume: a[5] || 0 }));
+    } catch { return null; }
+  })();
+  dexOhlcInflight.set(key, p);
+  void p.finally(() => { if (dexOhlcInflight.get(key) === p) dexOhlcInflight.delete(key); });
+  return p;
+}
+function dexChartKey(t: TokenDef): string { return 'dex:' + t.chainId + ':' + t.contract.toLowerCase(); }
+async function loadDexPriceChart(host: HTMLElement, t: TokenDef, onScrub: (info: ScrubInfo | null) => void) {
+  return runChartLoader(host, dexChartKey(t), (days) => fetchDexOhlc(t, days), onScrub);
+}
+async function runChartLoader(host: HTMLElement, cgId: string, fetchDays: (days: number) => Promise<OhlcCandle[] | null>, onScrub: (info: ScrubInfo | null) => void) {
   const gen = ++chartGen;
   chartScrubbing = false;
   const scrub = (info: ScrubInfo | null) => { chartScrubbing = !!info; onScrub(info); };
@@ -2291,14 +2425,14 @@ async function loadPriceChart(host: HTMLElement, cgId: string, onScrub: (info: S
     const warm = firstApply && cur && Date.now() - cur.at < CHART_FRESH_MS ? cur : null;
     firstApply = false;
     let [d, w, m, y] = await Promise.all([
-      warm?.d ? Promise.resolve(warm.d) : fetchOhlc(cgId, 1),
-      warm?.w ? Promise.resolve(warm.w) : fetchOhlc(cgId, 7),
-      warm?.m ? Promise.resolve(warm.m) : fetchOhlc(cgId, 30),
-      warm?.y ? Promise.resolve(warm.y) : fetchOhlc(cgId, 365),
+      warm?.d ? Promise.resolve(warm.d) : fetchDays(1),
+      warm?.w ? Promise.resolve(warm.w) : fetchDays(7),
+      warm?.m ? Promise.resolve(warm.m) : fetchDays(30),
+      warm?.y ? Promise.resolve(warm.y) : fetchDays(365),
     ]);
     if (!d || !w || !m || !y) {
       await new Promise(r => setTimeout(r, 1000));
-      [d, w, m, y] = await Promise.all([d ?? fetchOhlc(cgId, 1), w ?? fetchOhlc(cgId, 7), m ?? fetchOhlc(cgId, 30), y ?? fetchOhlc(cgId, 365)]);
+      [d, w, m, y] = await Promise.all([d ?? fetchDays(1), w ?? fetchDays(7), m ?? fetchDays(30), y ?? fetchDays(365)]);
     }
     return { d, w, m, y, at: Date.now() };
   };
@@ -3057,7 +3191,7 @@ function showSendConfirm(c: Chain, to: string, amtStr: string, err = '', poisonW
       if (feeNow != null && amt + feeNow > bNow) { showSendConfirm(c, to, amtStr, `Amount plus the network fee (~${trimNum(feeNow, 8)} ${c.symbol}) exceeds your balance. Go back and reduce the amount — the MAX shortcut leaves room for the fee.`, poisonWarn, nameLabel); return; }
     }
     const btn = $('#sendBtn') as HTMLButtonElement; btnBusy(btn, 'Signing & broadcasting…');
-    try { const overrides = c.kind === 'evm' ? (chosenFees(feeState, feeInfo)?.overrides || {}) : {}; const hash = await doSend(c, to, amtStr, overrides); recordLocalTx(c.id, hash, `Sent ${c.symbol}`, { dir: 'out', sym: c.symbol, amt: amtStr, cp: to }); recordCounterparty(to); balances.delete(c.id); sendDrafts.delete(c.id);
+    try { const overrides = c.kind === 'evm' ? (chosenFees(feeState, feeInfo)?.overrides || {}) : {}; const hash = await doSend(c, to, amtStr, overrides); recordLocalTx(c.id, hash, `Sent ${c.symbol}`, { dir: 'out', sym: c.symbol, amt: amtStr, cp: to }); recordCounterparty(to); sendDrafts.delete(c.id); refreshAfterAction([c]);
       celebrate(btn, () => {
         setView(receiptHTML({ title: 'Sent', amount: `${trimNum(amt, 8)} ${c.symbol}`, fiat: priceOf(c) ? fmtUsd(amt * priceOf(c)!) : '', toLine: `To ${shortAddr(to)}`, sub: `on ${c.name}`, hash, doneLabel: 'Done' }));
         bindReceipt(hash, c.explorerTx, (el) => goTab('wallet', el));
@@ -3374,10 +3508,184 @@ function openTxDetail(rw: ActivityRow, chain?: Chain) {
   const ex = wrap?.querySelector('#txExp') as HTMLElement | null;
   if (ex && c?.explorerTx) ex.onclick = () => window.open(c.explorerTx + rw.hash, '_blank');
 }
+// ---------- Activity: Open Positions panel (Components Library
+// #openPos, owner's order 2026-11-23, replacing the grouped-cards
+// display from earlier the same day) ----------
+// Polymarket positions live here (moved from Invest → Prediction)
+// and Hyperliquid perps show here too (they also stay in their
+// Hyperliquid screens — a second home, not a move). The panel is
+// the library component fed with the wallet's REAL positions: a
+// live Unrealized PnL total (the exact sum of every row), an
+// "N open" chip, Predictions · Polymarket and Perps · Hyperliquid
+// sections (max 3 rows visible, the section scrolls internally)
+// and the designed empty states — a flat wallet shows $0.00 and
+// both "No open …" messages. Rows keep their behaviour: a
+// prediction row opens that market's detail (where the sell flow
+// lives), a perp row opens its market screen. Only when BOTH reads
+// fail does the block render nothing (honest absence — the
+// positions still live in their own screens).
+let actPosTimer: ReturnType<typeof setInterval> | null = null;
+function actHlPosIconHTML(p: HlPosition): string {
+  const base = hlBaseName(p.coin);
+  const url = underlyingIconUrl(base);
+  const letter = (base || '?').trim().charAt(0).toUpperCase() || '?';
+  if (!url) return `<span class="polyEvIc polyTile" style="background:#232a35">${esc(letter)}</span>`;
+  return `<span class="polyEvIc polyTile" style="background:#232a35">${esc(letter)}<img class="coinImg" src="${esc(url)}" alt=""></span>`;
+}
+// Open Positions panel (Components Library #openPos): perp row icon —
+// coin logo over its letter in the component's dark tile.
+function opPerpIconHTML(p: HlPosition): string {
+  const base = hlBaseName(p.coin);
+  const url = underlyingIconUrl(base) || stockIconUrl(base);
+  const letter = (base || '?').trim().charAt(0).toUpperCase() || '?';
+  return `<span class="op-ic">${esc(letter)}${url ? `<img class="coinImg" src="${esc(url)}" alt="">` : ''}</span>`;
+}
+// ---------- Activity positions render: last-known first, in-place refresh ----------
+// The block paints from the actPosMem snapshot the moment the tab
+// opens (same frame as the view itself), then each fetch refreshes
+// it invisibly: when the position SET is unchanged only the numbers
+// are rewritten in place — the DOM, and with it the row lists'
+// scroll position, is left untouched. Rows are added or removed
+// only when the set actually changes, so a repaint never blanks
+// the block and never reshuffles it.
+let actPosSig = '';
+let actPosPaintedKey = '';
+function actPolyKey(p: PolyPosition): string { return p.conditionId + ':' + p.asset; }
+function actPerpKey(p: HlPosition): string { return p.coin + '|' + (p.dex || '') + '|' + (p.szi >= 0 ? 'L' : 'S'); }
+function actPosSigOf(poly: PolyPosition[], perps: HlPosition[]): string { return poly.map(actPolyKey).join(',') + '#' + perps.map(actPerpKey).join(','); }
+function coerceActPos(ps: PolyPosition[] | null, hlPos: HlPosition[] | null): { poly: PolyPosition[]; perps: HlPosition[] } {
+  // Per-entry isolation (2026-11-24): coerce every numeric/string
+  // field at the boundary, so ONE malformed position entry (a
+  // legacy or partial record) renders as zeros instead of throwing
+  // inside the row templates and blanking the whole block.
+  const poly = (ps || []).map(p => ({ ...p, title: String(p?.title || ''), outcome: String(p?.outcome || ''), size: Number(p?.size) || 0, curPrice: Number(p?.curPrice) || 0, cashPnl: Number(p?.cashPnl) || 0, currentValue: Number(p?.currentValue) || 0 }));
+  const perps = (hlPos || []).map(p => ({ ...p, coin: String(p?.coin || ''), szi: Number(p?.szi) || 0, entryPx: Number(p?.entryPx) || 0, markPx: Number(p?.markPx) || 0, unrealizedPnl: Number(p?.unrealizedPnl) || 0, positionValue: Number(p?.positionValue) || 0 }));
+  return { poly, perps };
+}
+function renderActPos(slot: HTMLElement, poly: PolyPosition[], perps: HlPosition[], key: string): void {
+  const money = (v: number): string => (v < 0 ? '-$' : '+$') + Math.abs(v).toFixed(2);
+  const total = poly.reduce((s, p) => s + p.cashPnl, 0) + perps.reduce((s, p) => s + p.unrealizedPnl, 0);
+  const totalCls = total === 0 ? 'flat' : total > 0 ? 'pos' : 'neg';
+  const sig = actPosSigOf(poly, perps);
+  if (slot.querySelector('.opPanel') && actPosPaintedKey === key && actPosSig === sig) {
+    // Same position set: rewrite ONLY the numbers in place.
+    const tot = slot.querySelector('.op-total');
+    if (tot) { tot.textContent = total === 0 ? '$0.00' : money(total); tot.className = 'op-total ' + totalCls; }
+    const cnt = slot.querySelector('.op-count');
+    if (cnt) cnt.textContent = `${poly.length + perps.length} open`;
+    const polyRows = new Map<string, Element>();
+    slot.querySelectorAll('[data-poly-pos]').forEach(r => polyRows.set((r as HTMLElement).dataset.polyPos || '', r));
+    for (const p of poly) {
+      const row = polyRows.get(actPolyKey(p)); if (!row) continue;
+      const sub = row.querySelector('.op-sub'); if (sub) sub.textContent = `${p.outcome} · ${trimNum(p.size, 2)} shares · ${Math.round(p.curPrice * 100)}¢`;
+      const pnl = row.querySelector('.op-pnl'); if (pnl) { pnl.textContent = money(p.cashPnl); pnl.className = 'op-pnl ' + (p.cashPnl >= 0 ? 'pos' : 'neg'); }
+      const val = row.querySelector('.op-val'); if (val) val.textContent = '$' + p.currentValue.toFixed(2);
+    }
+    const perpRows = new Map<string, Element>();
+    slot.querySelectorAll('[data-act-hl]').forEach(r => perpRows.set((r as HTMLElement).dataset.actHl || '', r));
+    for (const p of perps) {
+      const row = perpRows.get(actPerpKey(p)); if (!row) continue;
+      const base = hlBaseName(p.coin);
+      const roe = p.leverage ? (p.unrealizedPnl / (p.entryPx * Math.abs(p.szi) / p.leverage)) * 100 : NaN;
+      const name = row.querySelector('.op-name'); if (name) name.textContent = `${base} ${p.szi > 0 ? 'Long' : 'Short'}${p.leverage ? ` · ${p.leverage}x Cross` : ''}`;
+      const sub = row.querySelector('.op-sub'); if (sub) sub.textContent = `Entry ${fmtPrice(p.entryPx)} · Mark ${fmtPrice(p.markPx)}`;
+      const pnl = row.querySelector('.op-pnl'); if (pnl) { pnl.textContent = money(p.unrealizedPnl); pnl.className = 'op-pnl ' + (p.unrealizedPnl >= 0 ? 'pos' : 'neg'); }
+      const val = row.querySelector('.op-val'); if (val) val.textContent = Number.isFinite(roe) ? `${roe < 0 ? '-' : '+'}${Math.abs(roe).toFixed(1)}% ROE` : '$' + p.positionValue.toFixed(2);
+    }
+    return;
+  }
+  const predRows = poly.length ? poly.map(p => `<div class="op-row" role="button" tabindex="0" data-poly-pos="${esc(p.conditionId)}:${esc(p.asset)}"><span class="op-ic white"><img class="op-pmimg" src="/assets/polymarket-logo.png" alt=""></span><div class="op-main"><div class="op-name">${esc(p.title)}</div><div class="op-sub">${esc(p.outcome)} · ${trimNum(p.size, 2)} shares · ${Math.round(p.curPrice * 100)}¢</div></div><div class="op-right"><div class="op-pnl ${p.cashPnl >= 0 ? 'pos' : 'neg'}">${money(p.cashPnl)}</div><div class="op-val">$${p.currentValue.toFixed(2)}</div></div></div>`).join('') : '<div class="op-empty">No open predictions</div>';
+  const perpRows = perps.length ? perps.map(p => {
+    const base = hlBaseName(p.coin);
+    const roe = p.leverage ? (p.unrealizedPnl / (p.entryPx * Math.abs(p.szi) / p.leverage)) * 100 : NaN;
+    return `<div class="op-row" role="button" tabindex="0" data-act-hl="${esc(actPerpKey(p))}">${opPerpIconHTML(p)}<div class="op-main"><div class="op-name">${esc(base)} ${p.szi > 0 ? 'Long' : 'Short'}${p.leverage ? ` · ${p.leverage}x Cross` : ''}</div><div class="op-sub">Entry ${fmtPrice(p.entryPx)} · Mark ${fmtPrice(p.markPx)}</div></div><div class="op-right"><div class="op-pnl ${p.unrealizedPnl >= 0 ? 'pos' : 'neg'}">${money(p.unrealizedPnl)}</div><div class="op-val">${Number.isFinite(roe) ? `${roe < 0 ? '-' : '+'}${Math.abs(roe).toFixed(1)}% ROE` : '$' + p.positionValue.toFixed(2)}</div></div></div>`;
+  }).join('') : '<div class="op-empty">No open perps</div>';
+  slot.innerHTML = `<div class="opWrap"><div class="opPanel strokeLit"><div class="op-head"><div class="op-hmain"><span class="op-hlabel">Unrealized PnL</span><span class="op-total ${totalCls}">${total === 0 ? '$0.00' : money(total)}</span></div><span class="op-count">${poly.length + perps.length} open</span></div><div class="op-sec">Predictions <span class="op-venue"><img class="op-vlogo" src="/assets/polymarket-logo.png" alt="">Polymarket</span></div><div class="op-list">${predRows}</div><div class="op-sec">Perps <span class="op-venue"><img class="op-vlogo" src="/assets/hyperliquid-logo.png" alt="">Hyperliquid</span></div><div class="op-list">${perpRows}</div></div></div>`;
+  actPosSig = sig; actPosPaintedKey = key;
+  // Prediction rows keep their Invest behaviour: a tap opens that
+  // market's detail (outcome side = the position's own token), where
+  // the sell panel lives.
+  let posBusy = false;
+  const openPos = async (row: HTMLElement) => {
+    if (posBusy) return;
+    const [cond, asset] = (row.dataset.polyPos || '').split(':');
+    if (!cond) return;
+    posBusy = true;
+    try {
+      const m = await gammaMarketByCondition(cond);
+      if (!m) return;
+      const ix = Math.max(0, m.tokenIds.indexOf(asset));
+      polySel = { market: m, eventTitle: m.question, outcomeIx: ix };
+      go({ route: 'polymarket' }, row);
+    } catch { /* stay on the tab — the row can be tapped again */ }
+    finally { posBusy = false; }
+  };
+  slot.querySelectorAll('[data-poly-pos]').forEach(row => {
+    const el = row as HTMLElement;
+    el.onclick = () => void openPos(el);
+    el.onkeydown = (e: KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void openPos(el); } };
+  });
+  slot.querySelectorAll('[data-act-hl]').forEach(row => {
+    const el = row as HTMLElement;
+    const open = () => { const p = (actPosMem && actPosMem.key === key ? actPosMem.perps : perps).find(x => actPerpKey(x) === el.dataset.actHl); if (!p) return; investHlSel = { dex: p.dex, name: p.coin }; go({ route: 'hlmarket' }, el); };
+    el.onclick = open;
+    el.onkeydown = (e: KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } };
+  });
+}
+async function paintActivityPositions() {
+  const slot = $('#actPositions'); if (!slot || currentRoute !== 'activity') return;
+  const key = accKey();
+  // Paint the last-known snapshot for THIS account immediately —
+  // the block is on screen in the same frame as the tab itself,
+  // not whenever the network reads happen to land.
+  if (actPosMem && actPosMem.key === key) renderActPos(slot, actPosMem.poly, actPosMem.perps, key);
+  const addr = evmAddressOf();
+  const master = hlMasterAddr();
+  const [ps, hlPos] = await Promise.all([
+    addr ? polyPositions(addr).catch(() => null) : Promise.resolve(null),
+    (async (): Promise<HlPosition[] | null> => {
+      // Isolated like the Polymarket read (2026-11-24): a throwing
+      // account read must degrade THIS source to null, never reject
+      // the Promise.all and blank the whole positions block.
+      try {
+        if (!master) return null;
+        await loadHlAcct(master);
+        return hlAcct && hlAcctAddr === master ? hlAcct.positions : null;
+      } catch { return null; }
+    })(),
+  ]);
+  if (!document.body.contains(slot) || currentRoute !== 'activity') return;
+  if (ps === null && hlPos === null) {
+    // Both reads failed: with a snapshot on screen, keep showing it
+    // (a failed round is not "no positions"); with nothing known
+    // yet, render nothing (honest absence, as before).
+    if (!actPosMem || actPosMem.key !== key) { slot.innerHTML = ''; actPosSig = ''; actPosPaintedKey = ''; }
+    return;
+  }
+  const fresh = coerceActPos(ps, hlPos);
+  // A source that failed THIS round keeps its last-known rows
+  // instead of flashing its empty state; a source that answered
+  // replaces its rows with the fresh read.
+  const poly = ps !== null ? fresh.poly : (actPosMem && actPosMem.key === key ? actPosMem.poly : []);
+  const perps = hlPos !== null ? fresh.perps : (actPosMem && actPosMem.key === key ? actPosMem.perps : []);
+  actPosMem = { key, poly, perps };
+  saveDataCache();
+  renderActPos(slot, poly, perps, key);
+}
+
 function showActivity() {
   // "All networks" is the FIRST chip and the DEFAULT selection on every
   // fresh open of the tab (user's order, 2026-11-19).
-  setView(`<main><div class="ltWrap"><div class="largeTitle">Activity</div></div><div class="chipRail" id="actRail"><button class="netChip on" data-c="all">${iconHTML('', 'ALL', 'All networks', { sm: true })}<span>All networks</span></button>${visibleChains().map(x => `<button class="netChip" data-c="${x.id}">${iconHTML(chainIconUrl(x), x.symbol, x.name, { sm: true })}<span>${esc(x.name)}</span></button>`).join('')}</div><div id="actList" style="padding:2px 16px 0">${waveLoadBlockHTML()}</div></main>`);
+  setView(`<main><div class="ltWrap"><div class="largeTitle">Activity</div></div><div class="chipRail" id="actRail"><button class="netChip on" data-c="all">${iconHTML('', 'ALL', 'All networks', { sm: true })}<span>All networks</span></button>${visibleChains().map(x => `<button class="netChip" data-c="${x.id}">${iconHTML(chainIconUrl(x), x.symbol, x.name, { sm: true })}<span>${esc(x.name)}</span></button>`).join('')}</div><div id="actPositions"></div><div id="actList" style="padding:2px 16px 0">${waveLoadBlockHTML()}</div></main>`);
+  // Positions ride their own invisible refresh while the tab is
+  // open; the timer kills itself the moment the user leaves.
+  if (actPosTimer) { clearInterval(actPosTimer); actPosTimer = null; }
+  void paintActivityPositions();
+  actPosTimer = setInterval(() => {
+    if (currentRoute !== 'activity' || !document.getElementById('actPositions')) { if (actPosTimer) { clearInterval(actPosTimer); actPosTimer = null; } return; }
+    if (document.hidden) return;
+    void paintActivityPositions();
+  }, 25000);
   let actChain = 'all';
   let paintedChain = '';
   // Audit fix: Activity was hard-capped (15 per source, 20/40 after
@@ -3685,6 +3993,10 @@ type KeyTargetMeta = Omit<KeyTarget, 'value'>;
 // Audit L-1 (2026-11-19): the revealed secret lives in ONE module-level
 // holder so cleanup can actually clear it — it used to sit in a submit()
 // closure that survived the DOM wipe. Cleared by cleanupKeyGate().
+// Between the password check and the reveal render it waits in the
+// submit closure instead, registered with the same cleanup hook —
+// setView wipes this holder on EVERY render (the gate's own warning
+// step included), which is what left the reveal box empty.
 let keyGateSecret = '';
 let keysWalletId = '';
 let keysAcct = 0;
@@ -3832,6 +4144,7 @@ function showKeyGate(walletId: string, acct: number, targetId: string, err = '',
     if (waitLeft > 0) { showKeyGate(walletId, acct, targetId, `Too many failed attempts — wait ${Math.ceil(waitLeft / 1000)}s and try again.`, opts); return; }
     const pw = ($('#kgPw') as unknown as HTMLInputElement).value;
     const btn = $('#kgGo') as HTMLButtonElement; btnBusy(btn);
+    let pending = '';
     try {
       const plain = await decryptVault(getVault()!, pw);
       const parsed = parseVaultPlaintext(plain, getMeta());
@@ -3839,7 +4152,7 @@ function showKeyGate(walletId: string, acct: number, targetId: string, err = '',
       if (!w) throw new Error('wallet missing');
       const v = keyValueFor(w, acct, targetId);
       if (v == null) throw new Error('target missing');
-      keyGateSecret = v;
+      pending = v;
     } catch {
       noteAuthFailure('reveal');
       showKeyGate(walletId, acct, targetId, 'Wrong password — nothing was revealed.', opts);
@@ -3853,18 +4166,33 @@ function showKeyGate(walletId: string, acct: number, targetId: string, err = '',
     <div style="height:10px"></div><button class="btnGhost" id="kgCancel" type="button">Cancel</button></div></main>`);
     ($('#bk') as HTMLElement).onclick = () => backFn();
     ($('#kgCancel') as HTMLElement).onclick = () => backFn();
+    // The verified secret waits in the submit closure ONLY until the
+    // warning is answered; this clearer — registered with the same
+    // cleanupKeyGate hook L-1 uses — destroys it if the user navigates
+    // away or the app locks first. It must NOT be placed in
+    // keyGateSecret before the reveal renders: every setView runs
+    // cleanupKeyGate, so the warning screen's render wiped the holder
+    // and the reveal box (and Copy) came up empty for every target.
+    keyGateCleanup = () => { pending = ''; };
     ($('#kgUnderstand') as HTMLElement).onclick = () => {
+      const v = pending; pending = '';
+      if (!v) { backFn(); return; }
       // Step 3 — the reveal: blurred until tapped, wiped at 45s,
-      // wiped instantly when the tab hides.
+      // wiped instantly when the tab hides. The setView below consumes
+      // the warning-step clearer via cleanupKeyGate, so the secret is
+      // handed to the module holder and the box only AFTER the render,
+      // never through the template string.
       setView(`<main><button class="backBtn" id="bk" aria-label="Back"><i class="ri-arrow-left-s-line"></i></button><div class="largeTitle" style="padding-top:2px">${esc(title)}</div>
       <div style="padding:0 16px">${tMem.address ? `<p class="small muted" style="line-height:1.55">Account <span class="mono">${esc(tMem.address)}</span></p><div style="height:10px"></div>` : ''}
       <div class="gCard" style="padding:16px"><div class="fld"><label>${isPhrase ? 'Recovery phrase' : 'Private key'} · ${esc(tMem.sub.split('·')[1]?.trim() || '')}</label>
-      <div class="keyBox" id="keyBox" style="filter:blur(8px)">${esc(keyGateSecret)}</div>
+      <div class="keyBox" id="keyBox" style="filter:blur(8px)"></div>
       <p class="small muted" id="keyHint" style="text-align:center;margin-top:10px">Tap the ${isPhrase ? 'phrase' : 'key'} to reveal it</p></div>
       <div style="height:12px"></div><button class="btnGhost" id="kgCopy" type="button"><i class="ri-file-copy-line"></i> Copy ${isPhrase ? 'phrase' : 'key'} (clipboard clears in 20s)</button>
       <p class="small muted" id="kgCopyNote" style="text-align:center;margin-top:8px"></p></div></div></main>`);
       ($('#bk') as HTMLElement).onclick = () => backFn();
+      keyGateSecret = v;
       const box = $('#keyBox');
+      box.textContent = v;
       let shown = false;
       box.onclick = () => { shown = !shown; box.style.filter = shown ? 'none' : 'blur(8px)'; const h = $('#keyHint'); if (h) h.textContent = shown ? `Tap again to hide · hides itself in 45s` : `Tap the ${isPhrase ? 'phrase' : 'key'} to reveal it`; };
       ($('#kgCopy') as HTMLElement).onclick = (e) => { void copySecret(keyGateSecret, e.currentTarget as HTMLElement, () => { const n2 = $('#kgCopyNote'); if (n2) n2.textContent = 'Copied — but the clipboard could not be cleared automatically. Clear it manually.'; }); const n = $('#kgCopyNote'); if (n) n.textContent = 'Copied — clipboard clears in 20s'; };
@@ -4068,17 +4396,22 @@ function showToken(tokenId: string) {
   if (grp.asset != null && grp.members.length > 1 && tokenFocusChain !== tokenId) { showTokenAggregated(t, grp); return; }
   const c = findChain(t.chainId); if (!c) { goTab('wallet'); return; }
   const addr = addressFor(c);
+  // Owner rule (2026-11-23): the private-key row belongs to the chain,
+  // not to every token on it — it renders here ONLY for a native-asset
+  // token (contract 'native'); every contract token's detail omits it.
+  // The chain's own detail (showAsset) always carries it, and the
+  // Settings per-chain export is unchanged.
   setView(`<main><button class="backBtn" id="bk" aria-label="Back"><i class="ri-arrow-left-s-line"></i></button>
   <div class="dHead">
     <div class="dIdRow">${tokenIcon(t, true)}<div class="dIdTx"><div class="dName">${esc(t.name)}</div><div class="dSym">${esc(t.symbol)} · ${esc(c.name)}</div></div><span class="liveDot">LIVE</span></div>
     <div class="dBalBlock"><div class="dEyebrow">YOUR BALANCE</div><div class="dBalHero" id="tkBal">…</div><div class="dBalUsd" id="tkUsd"></div></div>
     <div class="dPriceBlock"><div class="dEyebrow" id="tkEyebrow">PRICE</div><div class="dPriceRow"><span class="dPriceVal" id="tkPriceVal">…</span><span id="tkPriceChg"></span></div></div>
   </div>
-  ${t.cg ? `<div class="dChart"><div id="priceChart" class="pchartHost"><div class="chartEmpty">${waveLoadHTML()} Loading live chart…</div></div></div><div class="chartCap" id="chartCaption"></div>` : ''}
+  ${t.cg || dexPriceKey(t) ? `<div class="dChart"><div id="priceChart" class="pchartHost"><div class="chartEmpty">${waveLoadHTML()} Loading live chart…</div></div></div><div class="chartCap" id="chartCaption"></div>` : ''}
   ${orbPair('send', () => go({ route: 'receive', chainId: c.id }), () => showTokenSend(t.id))}
   <div class="gGroup"><div class="gHead">Actions</div><div class="gCard">
     <button class="sRow" id="tkSwap"><span class="sIco"><i class="ri-swap-line"></i></span><span class="sTx"><span class="sLbl">Swap <b>${esc(t.symbol)}</b></span></span><span class="sChev"><i class="ri-arrow-right-s-line"></i></span></button>
-    ${keyTargetForChain(c) ? keyRowHTML('tkKey') : ''}
+    ${t.contract === 'native' && keyTargetForChain(c) ? keyRowHTML('tkKey') : ''}
   </div></div>
   ${t.cg ? `<div class="gGroup"><div class="gHead">Stats</div><div class="gCard flushHair">
     <div class="sRow stat"><span class="sTx"><span class="sLbl">Price</span></span><span class="sVal strong" id="tkStPrice">…</span></div>
@@ -4112,13 +4445,16 @@ function showToken(tokenId: string) {
   };
   paintTokenValues();
   if (t.cg) { const host = $('#priceChart'); if (host) void loadPriceChart(host, t.cg, (info) => paintTokenScrub(info)); }
+  else if (dexPriceKey(t)) { const host = $('#priceChart'); if (host) void loadDexPriceChart(host, t, (info) => paintTokenScrub(info)); }
   void refreshData(true);
 }
 // Addition 5 — the aggregated token view: one canonical asset held on
 // several networks. Total balance + total fiat up top, the asset's own
 // chart/stats (one price — the members ARE the same asset), then a
 // "By network" card whose rows open the classic single-chain view for
-// that network (which carries its contract, Send/Swap and key rows).
+// that network (which carries its contract and Send/Swap rows; the
+// private-key row lives on the chain's own detail, per the owner rule
+// noted in showToken).
 function showTokenAggregated(t: TokenDef, grp: TokenGroup) {
   const rep = grp.rep; const cg = grp.asset!;
   const tp = groupPrice(grp);
@@ -4133,7 +4469,7 @@ function showTokenAggregated(t: TokenDef, grp: TokenGroup) {
   ${orbPair('send', () => {}, () => {})}
   <div class="gGroup"><div class="gHead">By network</div><div class="gCard">
     ${members.map(m => { const mc = findChain(m.chainId); const b = tokenBalances.get(m.id); const f = b != null && tp != null ? b * tp : null; return `<button class="sRow" data-net="${m.id}">${mc ? coinIcon(mc) : ''}<span class="sTx"><span class="sLbl">${esc(mc?.name || m.chainId)}</span><div class="sSub">${b == null ? 'Balance unavailable' : fmtCrypto(b, m.symbol)}</div></span><span class="sVal strong">${f != null ? fmtUsd(f) : '—'}</span><i class="ri-arrow-right-s-line sChev"></i></button>`; }).join('')}
-  </div><div class="gFoot">One asset, held on ${grp.members.length} networks — the total above is the sum of these balances. Tap a network for its own contract, send and key options.</div></div>
+  </div><div class="gFoot">One asset, held on ${grp.members.length} networks — the total above is the sum of these balances. Tap a network for its own contract and send options.</div></div>
   <div class="gGroup"><div class="gHead">Actions</div><div class="gCard">
     <button class="sRow" id="tkSwapAgg"><span class="sIco"><i class="ri-swap-line"></i></span><span class="sTx"><span class="sLbl">Swap <b>${esc(rep.symbol)}</b></span><div class="sSub">Uses your largest balance above</div></span><span class="sChev"><i class="ri-arrow-right-s-line"></i></span></button>
   </div></div>
@@ -4181,7 +4517,7 @@ function paintTokenValues() {
   const aggregated = grp.asset != null && grp.members.length > 1 && tokenFocusChain !== t.id;
   const gt = aggregated ? groupTotals(grp) : null;
   const tb = aggregated ? gt!.amount : tokenBalances.get(t.id); const tp = tokenUsd(t);
-  const un = priceStateOf(t.cg) === 'pending' ? '…' : 'Unavailable';
+  const un = tokenPriceState(t) === 'pending' ? '…' : 'Unavailable';
   const b = $('#tkBal'); if (b) b.textContent = tb == null ? ((aggregated ? gt!.pending : tokStateOf(t.id) === 'pending') ? 'Loading…' : 'Unavailable') : fmtCrypto(tb, t.symbol);
   const u = $('#tkUsd'); if (u) u.textContent = tb != null && tp != null ? fmtUsd(tb * tp) : '';
   const d = priceEntry(t);
@@ -4556,7 +4892,7 @@ function showTokenConfirm(t: TokenDef, to: string, amtStr: string, err = '', nam
     const btn = $('#tkSendBtn') as HTMLButtonElement; btnBusy(btn, 'Signing & broadcasting…');
     try {
       const overrides = c.kind === 'evm' ? (chosenFees(feeState, feeInfo)?.overrides || {}) : {};
-      const hash = await doTokenSend(t, to, amtStr, overrides); recordLocalTx(t.chainId, hash, `Sent ${t.symbol}`, { dir: 'out', sym: t.symbol, amt: amtStr, cp: to, img: tokenIconUrl(t), cgid: t.cg }); recordCounterparty(to); tokenBalances.delete(t.id);
+      const hash = await doTokenSend(t, to, amtStr, overrides); recordLocalTx(t.chainId, hash, `Sent ${t.symbol}`, { dir: 'out', sym: t.symbol, amt: amtStr, cp: to, img: tokenIconUrl(t), cgid: t.cg }); recordCounterparty(to); refreshAfterAction([c], [t]);
       celebrate(btn, () => {
         setView(receiptHTML({ title: 'Sent', amount: `${trimNum(amt, 8)} ${t.symbol}`, toLine: `To ${shortAddr(to)}`, sub: `on ${c.name}`, hash, doneLabel: 'Done' }));
         bindReceipt(hash, c.explorerTx, (el) => goTab('wallet', el));
@@ -5531,8 +5867,7 @@ function showSwapConfirm(p: SwapConfirmPayload, err = '') {
     const btn = $('#swapGo') as HTMLButtonElement; btnBusy(btn, 'Signing & broadcasting…');
     try {
       const hash = await doSwapExecute(p); recordLocalTx(p.from.chainId, hash, `Swap ${p.from.symbol} → ${p.to.symbol}`, { dir: 'swap', sym: p.from.symbol, amt: String(amtIn), img: p.from.img });
-      if (p.from.contract === 'native') balances.delete(p.from.chainId); else if (p.from.tokenId) tokenBalances.delete(p.from.tokenId);
-      if (p.to.contract === 'native') balances.delete(p.to.chainId); else if (p.to.tokenId) tokenBalances.delete(p.to.tokenId);
+      refreshAfterAction([findChain(p.from.chainId), findChain(p.to.chainId)], [p.from.tokenId ? findToken(p.from.tokenId) : undefined, p.to.tokenId ? findToken(p.to.tokenId) : undefined]);
       celebrate(btn, () => {
         setView(receiptHTML({ title: 'Swap submitted', amount: `${trimNum(amtIn, 8)} ${p.from.symbol}`, sub: `→ ≈ ${trimNum(q.outHuman, q.outHuman < 1 ? 6 : 4)} ${p.to.symbol}${crossChain ? ' · This is the source-chain transaction. The bridge delivers on ' + tc.name + ' after it confirms — watch Activity on the destination network.' : ''}`, hash, extra: crossChain ? '<button class="btnGhost" id="swLifi" style="width:100%;margin-bottom:10px">Track on LI.FI explorer</button>' : '', doneLabel: 'Done' }));
         bindReceipt(hash, fc.explorerTx, (el) => goTab('wallet', el));
@@ -5911,7 +6246,7 @@ function showStakeConfirm(p: StakeConfirmPayload, err = '') {
     const btn = $('#stkDo') as HTMLButtonElement; btnBusy(btn, 'Signing & broadcasting…');
     try {
       const sig = await doStakeAction(p); recordLocalTx(c.id, sig, p.action === 'create' ? 'Staked SOL' : p.action === 'deactivate' ? 'Unstaking SOL' : 'Withdrew SOL', { dir: 'stake', sym: 'SOL', amt: p.action === 'create' ? p.amtStr : p.action === 'withdraw' ? String((p.stakeLamports ?? 0) / 1e9) : undefined });
-      stakeListCache = null; balances.delete(c.id);
+      stakeListCache = null; refreshAfterAction([c]);
       celebrate(btn, () => {
         setView(receiptHTML({ title: `${p.action === 'create' ? 'Stake' : p.action === 'deactivate' ? 'Deactivation' : 'Withdrawal'} submitted`, sub: 'on Solana', hash: sig, doneLabel: 'Back to staking' }));
         bindReceipt(sig, c.explorerTx, (el) => go({ route: 'stake', chainId: c.id }, el));
@@ -6010,7 +6345,7 @@ function showLidoConfirm(amtStr: string, err = '') {
       const contract = new ethers.Contract(LIDO_STETH, ['function submit(address) payable returns (uint256)'], wallet);
       const ch = chosenFees(feeState, feeInfo);
       const tx = await contract.submit(ethers.ZeroAddress, { value: ethers.parseEther(amtStr), ...(ch ? ch.overrides : {}) }); recordLocalTx('ethereum', tx.hash, 'Staked ETH · Lido', { dir: 'stake', sym: 'ETH', amt: amtStr });
-      balances.delete('ethereum'); tokenBalances.delete('bt-eth-steth');
+      refreshAfterAction([findChain('ethereum')], [findToken('bt-eth-steth')]);
       celebrate(btn, () => {
         setView(receiptHTML({ title: 'Lido stake submitted', sub: 'on Ethereum · Lido', hash: tx.hash, doneLabel: 'Done' }));
         bindReceipt(tx.hash, c.explorerTx, (el) => goTab('wallet', el));
@@ -6705,7 +7040,13 @@ async function loadHlMarkets(): Promise<{ dexes: HlDex[] } | null> {
   if (hlData && Date.now() - hlDataAt < 20000) return hlData;
   if (hlInflight) return hlInflight;
   hlInflight = (async () => {
-    try { const r = await fetch('/api/hl/markets'); if (!r.ok) return hlData; const j = await r.json();
+    // Bounded fetch (2026-11-24): this call carried NO timeout, so
+    // one silently-stalled connection (dead TCP on a carrier link —
+    // the request never errors, it just never answers) pinned
+    // hlInflight forever and the section sat on its loader for the
+    // whole session. A stall now settles in 20s, the caller paints
+    // its honest state, and the 25s tick retries.
+    try { const r = await fetch('/api/hl/markets', { signal: AbortSignal.timeout(20000) }); if (!r.ok) return hlData; const j = await r.json();
       // A fully-degraded snapshot (every dex failed upstream) never
       // replaces good data the user is already looking at — the
       // next refresh tick retries instead.
@@ -6720,7 +7061,7 @@ async function loadGt(chain: string): Promise<GtPool[]> {
   const hit = gtData.get(chain); if (hit) return hit;
   const flying = gtInflight.get(chain); if (flying) return flying;
   const p = (async () => {
-    try { const r = await fetch('/api/gt/trending/' + chain); if (!r.ok) return []; const j = await r.json(); const pools: GtPool[] = j.pools || []; gtData.set(chain, pools); return pools; } catch { return []; } finally { gtInflight.delete(chain); }
+    try { const r = await fetch('/api/gt/trending/' + chain, { signal: AbortSignal.timeout(15000) }); if (!r.ok) return []; const j = await r.json(); const pools: GtPool[] = j.pools || []; gtData.set(chain, pools); return pools; } catch { return []; } finally { gtInflight.delete(chain); }
   })();
   gtInflight.set(chain, p);
   return p;
@@ -6735,7 +7076,7 @@ async function loadBstocks(): Promise<BsStock[]> {
   if (bsData) return bsData;
   if (bsInflight) return bsInflight;
   bsInflight = (async () => {
-    try { const r = await fetch('/api/bstocks'); if (!r.ok) return []; const j = await r.json(); const stocks: BsStock[] = j.stocks || []; bsData = stocks; return stocks; } catch { return []; } finally { bsInflight = null; }
+    try { const r = await fetch('/api/bstocks', { signal: AbortSignal.timeout(15000) }); if (!r.ok) return []; const j = await r.json(); const stocks: BsStock[] = j.stocks || []; bsData = stocks; return stocks; } catch { return []; } finally { bsInflight = null; }
   })();
   return bsInflight;
 }
@@ -6965,6 +7306,133 @@ function hlRowList(data: { dexes: HlDex[] }): { dex: HlDex; a: HlAsset; cat: str
   for (const dex of data.dexes) for (const a of dex.assets) all.push({ dex, a, cat: hlCategory(dex.id, a.name, cryptoSyms) });
   return all;
 }
+// ---- Invest → Hyperliquid rows: the Active Position card ----
+// The Syn Components Library's final compact Long/Short card
+// (#nvdaPos, 132px) applied to EVERY market row, per Penta's order:
+// coin logo badge, "<COIN> Long or Short", live price + 24h change
+// under the name, 24H VOL top-right, the orb pair carrying the
+// market's live long/short skew, and a slim 34px live mini chart.
+// The component is VISUAL ONLY here: tapping Long, Short or anywhere
+// on the card opens the market detail, exactly like the old row.
+// Skew source: Hyperliquid publishes no long/short position split,
+// so the split is the live order book's depth imbalance (bid vs ask
+// notional within ±2% of mid) from /api/hl/skew. Charts are the
+// market's real 1h candles (24h) from /api/hl/candles. Both load
+// lazily as cards scroll into view and are cached across the list's
+// 25s repaints, so a refresh never refetches or blanks them.
+const hlSparkCache = new Map<string, { closes: number[]; at: number }>();
+const hlSkewCacheC = new Map<string, { longPct: number; at: number }>();
+let hlPosObserver: IntersectionObserver | null = null;
+function hlPosCardHTML(dex: HlDex, a: HlAsset, cat: string): string {
+  const base = hlBaseName(a.name);
+  const logo = cat === 'stocks' ? stockIconUrl(base) : cat === 'commodities' ? '' : underlyingIconUrl(base);
+  const badge = `${esc(base.charAt(0) || '?')}${logo ? `<img class="coinImg hlPosBadgeImg" src="${esc(logo)}" alt="" loading="lazy" decoding="async">` : ''}`;
+  const chg = a.change24h;
+  const skew = hlSkewCacheC.get(a.name);
+  const longTxt = skew && Date.now() - skew.at < 45000 ? skew.longPct + '%' : '—';
+  const shortTxt = skew && Date.now() - skew.at < 45000 ? (100 - skew.longPct) + '%' : '—';
+  return `<div class="hlPosCard strokeLit" data-hl="${esc(dex.id)}:${esc(a.name)}" data-hlcoin="${esc(a.name)}" role="button" tabindex="0" aria-label="${esc(base)} perpetual market">
+    <div class="hlPosHeader"><span class="hlPosBadge">${badge}</span><div class="hlPosMain"><h3 class="hlPosTitle">${esc(base)} Long or Short</h3><div class="hlPosPrice"><span class="hlPosP">${fmtPrice(a.markPx)}</span><span class="hlPosChg ${chg == null ? '' : chg >= 0 ? 'pos' : 'neg'}">${chg == null ? '—' : (chg >= 0 ? '+' : '') + chg.toFixed(2) + '%'}</span></div></div><div class="hlPosVol"><span class="hlPosVolL">24H VOL</span><span class="hlPosVolV">${fmtMcap(a.dayNtlVlm).replace(/^[^\d.]+/, '')}</span></div></div>
+    <div class="mmcBets"><span class="mmcOrb mmcInteractive strokeLit"><span class="mmcSlot mmcOrbTilt">${MMC_TREND_UP}</span><span class="mmcLbl">Long <span data-hl-long="${esc(a.name)}">${longTxt}</span></span></span><span class="mmcOrb mmcInteractive mmcMuted strokeLit"><span class="mmcSlot mmcFlat">${MMC_TREND_DOWN}</span><span class="mmcLbl">Short <span data-hl-short="${esc(a.name)}">${shortTxt}</span></span></span></div>
+    <div class="hlPosChart"><canvas data-hl-chart="${esc(a.name)}"></canvas></div>
+  </div>`;
+}
+function drawHlSpark(canvas: HTMLCanvasElement, closes: number[], up: boolean) {
+  const ctx = canvas.getContext('2d'); if (!ctx || closes.length < 2) return;
+  const w = canvas.clientWidth || 330; const h = 34; const dpr = Math.min(2, window.devicePixelRatio || 1);
+  canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr);
+  const W = canvas.width; const H = canvas.height;
+  let lo = Math.min(...closes); let hi = Math.max(...closes);
+  const pad = (hi - lo) * 0.18 || hi * 0.001 || 1; lo -= pad; hi += pad;
+  const X = (i: number) => i / (closes.length - 1) * W;
+  const Y = (v: number) => H - ((v - lo) / (hi - lo)) * H;
+  const col = up ? '52,211,153' : '248,113,113';
+  ctx.clearRect(0, 0, W, H);
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, 'rgba(' + col + ',.28)'); grad.addColorStop(1, 'rgba(' + col + ',0)');
+  ctx.beginPath();
+  closes.forEach((v, i) => { if (i) ctx.lineTo(X(i), Y(v)); else ctx.moveTo(X(i), Y(v)); });
+  ctx.strokeStyle = 'rgb(' + col + ')'; ctx.lineWidth = 1.2 * dpr; ctx.lineJoin = 'round'; ctx.stroke();
+  ctx.lineTo(W, H); ctx.lineTo(0, H); ctx.closePath(); ctx.fillStyle = grad; ctx.fill();
+  const lx = X(closes.length - 1) - dpr; const ly = Y(closes[closes.length - 1]);
+  ctx.beginPath(); ctx.arc(lx, ly, 3.5 * dpr, 0, Math.PI * 2); ctx.fillStyle = 'rgba(' + col + ',.25)'; ctx.fill();
+  ctx.beginPath(); ctx.arc(lx, ly, 2 * dpr, 0, Math.PI * 2); ctx.fillStyle = 'rgb(' + col + ')'; ctx.fill();
+  ctx.beginPath(); ctx.arc(lx, ly, dpr, 0, Math.PI * 2); ctx.fillStyle = '#fff'; ctx.fill();
+}
+function hlPosPaintData(coin: string) {
+  const skew = hlSkewCacheC.get(coin);
+  if (skew) document.querySelectorAll(`[data-hl-long="${CSS.escape(coin)}"]`).forEach(el => { el.textContent = skew.longPct + '%'; });
+  if (skew) document.querySelectorAll(`[data-hl-short="${CSS.escape(coin)}"]`).forEach(el => { el.textContent = (100 - skew.longPct) + '%'; });
+  const spark = hlSparkCache.get(coin);
+  if (spark && spark.closes.length > 1) {
+    const up = spark.closes[spark.closes.length - 1] >= spark.closes[0];
+    document.querySelectorAll(`canvas[data-hl-chart="${CSS.escape(coin)}"]`).forEach(cv => drawHlSpark(cv as HTMLCanvasElement, spark.closes, up));
+  }
+}
+// List feeds are BATCHED (2026-11-24): this loader used to fire TWO
+// requests per card (candles + skew, the skew one with no timeout).
+// A phone scrolling the list blew the server's shared per-minute
+// bucket, so skew sat at "—" and charts painted sporadically while
+// prices (one cached call) loaded fine. Cards now queue their coin
+// and one flush asks for every queued coin in a single request per
+// feed. A coin the server has no reading for stays uncached and is
+// re-queued by the next 25s repaint, so a failed feed retries on
+// the existing cadence instead of sitting at a dash forever.
+const hlBatchPending = new Set<string>();
+let hlBatchTimer: ReturnType<typeof setTimeout> | null = null;
+function hlQueueLoad(coin: string) {
+  hlBatchPending.add(coin);
+  if (hlBatchTimer) return;
+  hlBatchTimer = setTimeout(() => { hlBatchTimer = null; void hlFlushBatch(); }, 120);
+}
+async function hlBatchFetch(url: string): Promise<any> {
+  const ctl = new AbortController(); const to = setTimeout(() => ctl.abort(), 15000);
+  try { const r = await fetch(url, { signal: ctl.signal }); if (!r.ok) return null; return await r.json(); } catch { return null; } finally { clearTimeout(to); }
+}
+async function hlFlushBatch() {
+  const coins = Array.from(hlBatchPending).slice(0, 40);
+  coins.forEach(c => hlBatchPending.delete(c));
+  if (!coins.length) return;
+  const q = coins.map(encodeURIComponent).join(',');
+  const [sk, sp] = await Promise.all([hlBatchFetch('/api/hl/skews?coins=' + q), hlBatchFetch('/api/hl/sparklines?coins=' + q)]);
+  for (const coin of coins) {
+    const s = sk?.skews?.[coin];
+    if (s && typeof s.longPct === 'number') hlSkewCacheC.set(coin, { longPct: s.longPct, at: Date.now() });
+    const closes = sp?.sparks?.[coin];
+    if (Array.isArray(closes) && closes.length > 1) hlSparkCache.set(coin, { closes: closes as number[], at: Date.now() });
+    hlPosPaintData(coin);
+  }
+  if (hlBatchPending.size && !hlBatchTimer) hlBatchTimer = setTimeout(() => { hlBatchTimer = null; void hlFlushBatch(); }, 60);
+}
+async function hlPosLoad(coin: string) {
+  // Chart and skew paint INDEPENDENTLY from cache the moment each
+  // lands — one slow or failed feed must never hold the other
+  // hostage (the old Promise.all paint left whole cards blank when
+  // a single fetch stalled; owner's bug report 2026-11-23).
+  const spark = hlSparkCache.get(coin);
+  const skew = hlSkewCacheC.get(coin);
+  if (!spark || Date.now() - spark.at > 90000 || !skew || Date.now() - skew.at > 45000) hlQueueLoad(coin);
+  hlPosPaintData(coin);
+}
+function hlPosHydrate(root: HTMLElement) {
+  const cards = Array.from(root.querySelectorAll('.hlPosCard')) as HTMLElement[];
+  if (!('IntersectionObserver' in window)) { cards.forEach(c => { const coin = c.dataset.hlcoin; if (coin) void hlPosLoad(coin); }); return; }
+  if (hlPosObserver) hlPosObserver.disconnect();
+  hlPosObserver = new IntersectionObserver(entries => {
+    for (const en of entries) {
+      if (!en.isIntersecting) continue;
+      const coin = (en.target as HTMLElement).dataset.hlcoin;
+      hlPosObserver?.unobserve(en.target);
+      if (coin) void hlPosLoad(coin);
+    }
+  }, { rootMargin: '240px 0px' });
+  for (const c of cards) {
+    const coin = c.dataset.hlcoin; if (!coin) continue;
+    const spark = hlSparkCache.get(coin); const skew = hlSkewCacheC.get(coin);
+    if (spark && Date.now() - spark.at < 90000 && skew && Date.now() - skew.at < 45000) hlPosPaintData(coin);
+    else hlPosObserver.observe(c);
+  }
+}
 async function paintInvestHl(body: HTMLElement) {
   const gen = investPaintGen;
   const cats = [{ id: 'crypto', name: 'Crypto perps' }, { id: 'stocks', name: 'Stocks' }, { id: 'commodities', name: 'Commodities' }, { id: 'preipo', name: 'Pre-IPO' }, { id: 'all', name: 'All markets' }] as const;
@@ -6983,8 +7451,9 @@ async function paintInvestHl(body: HTMLElement) {
     const rows = all.filter(r => (q ? (r.a.name.toLowerCase().includes(q) || hlBaseName(r.a.name).toLowerCase().includes(q) || r.dex.name.toLowerCase().includes(q)) : (investCat === 'all' || r.cat === investCat))).sort((x, y) => y.a.dayNtlVlm - x.a.dayNtlVlm);
     const failed = data.dexes.filter(d => d.ok === false);
     const foot = `<p class="small muted" style="padding:8px 16px">${q ? `Search results across all categories` : investCat === 'all' ? 'All live markets' : cats.find(c => c.id === investCat)?.name} · ${rows.length} of ${all.length} live markets · Source: Hyperliquid${failed.length ? ` · ${failed.map(d => esc(d.name)).join(', ')} unavailable right now` : ''}</p>`;
-    slot.innerHTML = rows.length ? `<div class="iosList homeList" style="margin:0 16px">${rows.map(({ dex, a, cat }) => `<button class="aRow" data-hl="${esc(dex.id)}:${esc(a.name)}">${cat === 'commodities' ? commodityIcon(hlBaseName(a.name), a.name, { sm: true }) : cat === 'stocks' ? stockIcon(hlBaseName(a.name), a.name, { sm: true }) : underlyingIcon(hlBaseName(a.name), a.name, { sm: true })}<span class="aMid"><span class="aName">${esc(hlBaseName(a.name))} <span class="aSym">${dex.id ? esc(dex.name) : 'Hyperliquid'}</span></span><span class="aSub"><span>${fmtPrice(a.markPx)}</span> ${chgPill(a.change24h)}</span></span><span class="aRight"><span class="amt">${fmtMcap(a.dayNtlVlm)}</span><span class="usd">24h volume</span></span><i class="ri-arrow-right-s-line aChev"></i></button>`).join('')}</div>${foot}` : `<p class="small muted secEmpty">${q ? `No live market matches '${esc(investQuery.trim())}'.` : 'No live markets in this category right now.'}</p>${foot}`;
+    slot.innerHTML = rows.length ? `<div class="hlPosList">${rows.map(({ dex, a, cat }) => hlPosCardHTML(dex, a, cat)).join('')}</div>${foot}` : `<p class="small muted secEmpty">${q ? `No live market matches '${esc(investQuery.trim())}'.` : 'No live markets in this category right now.'}</p>${foot}`;
     slot.querySelectorAll('[data-hl]').forEach(b => (b as HTMLElement).onclick = () => { const v = (b as HTMLElement).dataset.hl || ''; const ix = v.indexOf(':'); investHlSel = { dex: v.slice(0, ix), name: v.slice(ix + 1) }; go({ route: 'hlmarket' }, b as HTMLElement); });
+    if (rows.length) hlPosHydrate(slot);
   };
   const hlData0 = await loadHlMarkets();
   if (gen !== investPaintGen) return; // superseded — don't paint or arm a second timer
@@ -7082,7 +7551,7 @@ function mmcCardHTML(e: PolyEvent, m: PolyMarket, title: string, letter: string)
   const endMs = Date.parse(m.endDate || e.endDate);
   const asset = parseUpDownSlug(m.slug)?.asset || '';
   const logo = UD_COIN_LOGOS[asset] || '';
-  const badge = `${esc(letter || '?')}${logo ? `<img class="coinImg mmcBadgeImg" src="${logo}" alt="">` : ''}`;
+  const badge = `${esc(letter || '?')}${logo ? `<img class="coinImg mmcBadgeImg" src="${logo}" alt="" loading="lazy" decoding="async">` : ''}`;
   return `<div class="polyCard mmcCard strokeLit" data-polym="${esc(m.conditionId)}" data-mmc-cond="${esc(m.conditionId)}" role="button" tabindex="0">
     <div class="mmcHeader"><span class="mmcBadge">${badge}</span><h3 class="mmcTitle">${esc(title)}</h3><div class="mmcGauge"><svg viewBox="0 0 48 26" fill="none" aria-hidden="true"><path d="M5 24A19 19 0 0 1 43 24" stroke="#1c1c1c" stroke-width="4" stroke-linecap="round"/><path d="M5 24A19 19 0 0 1 43 24" stroke="#34d399" stroke-width="4" stroke-linecap="round" stroke-dasharray="${(p * 59.69).toFixed(2)} 59.69"/></svg><div class="mmcGaugePct" data-poly-price="${esc(m.tokenIds[0] || '')}">${polyPct(p)}</div><div class="mmcGaugeLbl">${esc(m.outcomes[0] || 'Up')}</div></div></div>
     <div class="mmcTipsTop"><span data-tip="0"></span><span data-tip="1"></span></div>
@@ -7160,7 +7629,7 @@ function bncCardHTML(e: PolyEvent, m: PolyMarket): string {
   const p = m.prices[0] ?? 0;
   const p1 = m.prices[1] ?? (1 - p);
   const letter = (m.question || e.title || '?').trim().charAt(0).toUpperCase();
-  const badge = `${esc(letter)}${e.image && isSafeMediaUrl(e.image) ? `<img class="coinImg evcBadgeImg" src="${esc(e.image)}" alt="">` : ''}`;
+  const badge = `${esc(letter)}${e.image && isSafeMediaUrl(e.image) ? `<img class="coinImg evcBadgeImg" src="${esc(e.image)}" alt="" loading="lazy" decoding="async">` : ''}`;
   return `<div class="polyCard evcCard strokeLit" data-polym="${esc(m.conditionId)}" role="button" tabindex="0">
     <div class="evcHead"><span class="evcBadge">${badge}</span><h3 class="evcTitle">${esc(m.question)}</h3></div>
     <div class="mmcBets"><button class="mmcOrb mmcInteractive strokeLit" data-poly-go="${esc(m.conditionId)}:0"><span class="mmcSlot mmcOrbTilt">${MMC_TREND_UP}</span><span class="mmcLbl">${esc(m.outcomes[0] || 'Yes')} <span data-poly-cents="${esc(m.tokenIds[0] || '')}">${polyCents(p)}</span></span></button><button class="mmcOrb mmcInteractive mmcMuted strokeLit" data-poly-go="${esc(m.conditionId)}:1"><span class="mmcSlot mmcFlat">${MMC_TREND_DOWN}</span><span class="mmcLbl">${esc(m.outcomes[1] || 'No')} <span data-poly-cents="${esc(m.tokenIds[1] || '')}">${polyCents(p1)}</span></span></button></div>
@@ -7191,7 +7660,7 @@ function polyEventCard(e: PolyEvent): string {
     return `<button class="evcRow" data-poly-go="${esc(m.conditionId)}:0"><span class="evcLbl">${esc(m.outcomes[0] && m.outcomes[0] !== 'Yes' ? m.question : (m.question.replace(/^Will\s+/i, '').slice(0, 44)))}</span><span class="evcBar"><span style="width:${Math.round(p * 100)}%"></span></span><span class="evcPct" data-poly-price="${esc(m.tokenIds[0] || '')}">${polyPct(p)}</span></button>`;
   }).join('');
   const letter = (e.title || '?').trim().charAt(0).toUpperCase();
-  const badge = `${esc(letter)}${e.image && isSafeMediaUrl(e.image) ? `<img class="coinImg evcBadgeImg" src="${esc(e.image)}" alt="">` : ''}`;
+  const badge = `${esc(letter)}${e.image && isSafeMediaUrl(e.image) ? `<img class="coinImg evcBadgeImg" src="${esc(e.image)}" alt="" loading="lazy" decoding="async">` : ''}`;
   return `<div class="polyCard evcCard strokeLit" data-polym="${esc(e.markets[0]?.conditionId || '')}" role="button" tabindex="0">
     <div class="evcHead"><span class="evcBadge">${badge}</span><h3 class="evcTitle">${esc(e.title)}</h3></div>
     <div class="evcRows">${rows}</div>
@@ -7295,6 +7764,7 @@ function qtPanelHTML(sel: { eventTitle: string; outcomeIx: number }, m: PolyMark
     <div class="qtSides" role="group" aria-label="Direction">${m.outcomes.map((o, ix) => `<button class="qtOrb qtStrokeLit qtFillAction qtInteractive${ix === sel.outcomeIx ? ' selected' : ''}" data-out="${ix}"><span class="qtOrbIc"><svg viewBox="0 0 256 256" fill="currentColor"><path d="${ix === 0 ? QT_TREND_UP : QT_TREND_DN}"${ix === 0 ? ' transform="translate(0,24)"' : ' transform="scale(1,-1) translate(0,-232)"'}"/></svg></span><span class="qtLbl">${esc(o)} <b data-poly-pill="${esc(m.tokenIds[ix] || '')}">${polyCents(m.prices[ix] ?? 0)}</b></span></button>`).join('')}</div>
     <div class="qtLabel" id="qtActionLabel">One-tap buy</div>
     <div class="qtPresets">${[5, 25, 100].map(a => `<button class="qtPreset qtHoverRaise qtInteractive" data-qtpreset="${a}" aria-pressed="false"><span class="qtAmt">$${a}</span><span class="qtWin" data-qtline="${a}">win <b data-win="${a}">—</b></span></button>`).join('')}</div>
+    <div class="qtCustom"><div class="qtCustomIn"><span class="qtCustomCur">$</span><input id="qtAmt" class="qtAmtIn" inputmode="decimal" placeholder="Custom amount" aria-label="Custom amount in dollars"></div><span class="qtWin" id="qtCustomEst">win <b>—</b></span><button class="qtCustomGo qtInteractive" id="qtCustomGo">Buy</button></div>
     <button class="qtSellAll qtInteractive" id="qtSellAll" style="display:none">Sell all shares</button>
     <div id="polyLimitRow" style="display:none;margin-top:12px"><label class="polyFldLbl">Limit price (¢)</label><input id="polyLimitPx" class="polyIn" inputmode="decimal" placeholder="50"></div>
     <div class="small muted" id="polyHoldLine" style="margin-top:10px"></div>
@@ -7314,10 +7784,16 @@ function polyUpDownCard(e: PolyEvent, m: PolyMarket, assetName: string, symbol: 
 // with a letter tile in a title-hashed colour if the image is missing
 // or fails to load, so a row never renders broken or empty.
 let polyPosSeenKey = '';
+// Money in the Activity positions block renders at exactly 2
+// decimals: fmtUsd's sub-$1 dust precision (up to 4 dp) leaked into
+// P&L there (−$0.1433), so the block formats through renderFiat
+// with dust off.
+function fmtPosUsd(v: number): string { return renderFiat(effectiveCode(), convertUsd(v), 2, false); }
+function fmtPosPnl(v: number): string { return (v >= 0 ? '+' : '−') + fmtPosUsd(Math.abs(v)); }
 function polyCountUp(el: HTMLElement) {
   const target = parseFloat(el.dataset.pcount || ''); if (!Number.isFinite(target)) return;
   const kind = el.dataset.pkind;
-  const fmt = (v: number): string => kind === 'pnl' ? (v < 0 ? '−' : '+') + fmtUsd(Math.abs(v)) : fmtUsd(v);
+  const fmt = (v: number): string => kind === 'pnl' ? fmtPosPnl(v) : fmtPosUsd(v);
   if (!wavesFxOn()) { el.textContent = fmt(target); return; }
   const t0 = performance.now(); const dur = 950;
   const step = (t: number) => { const k = Math.min(1, (t - t0) / dur); const e = 1 - Math.pow(1 - k, 3); el.textContent = fmt(target * e); if (k < 1) requestAnimationFrame(step); };
@@ -7342,54 +7818,12 @@ async function paintInvestPoly(body: HTMLElement) {
   polyListCleanup();
   body.innerHTML = `
     <div class="polyCats" role="tablist">${POLY_CATS.map(c => `<button class="polyCat${polyCat === c.id ? ' on' : ''}" data-cat="${c.id}">${c.icon ? `<i class="${c.icon}"></i>` : ''}<span>${c.label}</span></button>`).join('')}</div>
-    <div id="polyPositions"></div>
     <div id="polyNote"></div>
     <div id="polyList"><div style="padding:6px 16px">${waveLoadBlockHTML()}</div></div>
     <p class="small muted" style="padding:10px 16px;line-height:1.55">Live from Polymarket (Gamma + CLOB). Prices stream over the app's relayed WebSocket — the same market channel Polymarket's own site uses. Trading is attributed to Syn as a builder; your keys never leave this device.</p>`;
   body.querySelectorAll('[data-cat]').forEach(b => (b as HTMLElement).onclick = () => { polyCat = (b as HTMLElement).dataset.cat!; paintInvestBody(); });
-  // His positions (public Data API read for his Polygon address).
-  const addr = evmAddressOf();
-  if (addr) void polyPositions(addr).then(ps => {
-    const slot = $('#polyPositions'); if (!slot || currentRoute !== 'invest' || investSection !== 'poly') return;
-    if (!ps.length) { slot.innerHTML = ''; return; }
-    const total = ps.reduce((s, p) => s + p.currentValue, 0);
-    const net = ps.reduce((s, p) => s + p.cashPnl, 0);
-    const first = polyPosSeenKey !== addr; polyPosSeenKey = addr;
-    const fx = first && wavesFxOn();
-    slot.classList.toggle('fxOn', fx);
-    const cnt = (v: number, kind: string): string => first ? ` data-pcount="${v}" data-pkind="${kind}"` : '';
-    slot.innerHTML = `<div class="secHead" style="padding:2px 16px 6px"><span class="secTitle">Your positions</span><span class="polyPosTot"><span class="polyPosTotal"${cnt(total, 'usd')}>${fmtUsd(total)}</span><span class="polyPosNet ${net >= 0 ? 'pos' : 'neg'}"${cnt(net, 'pnl')}>${net >= 0 ? '+' : '−'}${fmtUsd(Math.abs(net))}</span></span></div>
-      <div style="padding:0 16px;display:flex;flex-direction:column;gap:8px">${ps.slice(0, 50).map((p, i) => `<div class="polyPosRow" style="--i:${i}" role="button" tabindex="0" data-poly-pos="${esc(p.conditionId)}:${esc(p.asset)}"><span class="polySheen" aria-hidden="true"></span>${polyPosIconHTML(p)}<span class="polyPosTx"><span class="polyPosT">${esc(p.title)}</span><span class="polyPosS">${esc(p.outcome)} · ${trimNum(p.size, 2)} shares @ ${polyCents(p.avgPrice)}</span></span><span class="polyPosVal"><span${cnt(p.currentValue, 'usd')}>${fmtUsd(p.currentValue)}</span><span class="${p.cashPnl >= 0 ? 'pos' : 'neg'}"${cnt(p.cashPnl, 'pnl')}>${p.cashPnl >= 0 ? '+' : '−'}${fmtUsd(Math.abs(p.cashPnl))}</span></span></div>`).join('')}</div>${ps.length > 50 ? `<p class="small muted" style="padding:8px 16px 0">Showing 50 of ${ps.length} positions — the totals above include all of them.</p>` : ''}`;
-    if (first) slot.querySelectorAll('[data-pcount]').forEach(el => polyCountUp(el as HTMLElement));
-    // Audit fix: position rows were dead — no market id, no wiring.
-    // A tap now opens that market's detail (outcome side = the
-    // position's own token), like every other market card.
-    let posBusy = false;
-    const openPos = async (row: HTMLElement) => {
-      if (posBusy) return;
-      const [cond, asset] = (row.dataset.polyPos || '').split(':');
-      if (!cond) return;
-      posBusy = true;
-      try {
-        const m = await gammaMarketByCondition(cond);
-        if (!m) return;
-        const ix = Math.max(0, m.tokenIds.indexOf(asset));
-        polySel = { market: m, eventTitle: m.question, outcomeIx: ix };
-        go({ route: 'polymarket' }, row);
-      } catch { /* stay on the list — the row can be tapped again */ }
-      finally { posBusy = false; }
-    };
-    slot.querySelectorAll('[data-poly-pos]').forEach(row => {
-      const el = row as HTMLElement;
-      el.onclick = () => void openPos(el);
-      el.onkeydown = (e: KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void openPos(el); } };
-    });
-  }).catch(() => {
-    // Audit fix: a failed positions read must not look identical to
-    // holding nothing — say so in the slot instead of leaving it blank.
-    const slot = $('#polyPositions'); if (!slot || currentRoute !== 'invest' || investSection !== 'poly') return;
-    if (!slot.innerHTML) slot.innerHTML = '<p class="small muted" style="padding:2px 16px 6px">Your positions couldn’t load right now — reopen this tab to retry.</p>';
-  });
+  // His Polymarket positions live in the Activity tab now (owner's
+  // order 2026-11-23) — paintActivityPositions owns that read.
   const paintUpDown = async (refresh = false) => {
     polyListCleanup();
     const slot = $('#polyList'); if (!slot || currentRoute !== 'invest' || investSection !== 'poly') return;
@@ -7441,8 +7875,17 @@ async function paintInvestPoly(body: HTMLElement) {
     const q = investQuery.trim();
     if (polyCat === 'updown' && q.length < 2) { await paintUpDown(); return; }
     const key = q.length >= 2 ? 'q:' + q.toLowerCase() : 'tag:' + polyCat;
-    const PAGE = 100; // Gamma's max page — categories hold far more than the old single page of 24.
+    // First page is 24 events (2026-11-24): the 100-event page is
+    // ~7.5MB before gzip and was the payload that blew the phone's
+    // fetch budget on carrier links. "Show more" pages at the same
+    // size — the list still reaches everything, one page at a time.
+    const PAGE = 24;
     const render = (events: PolyEvent[]) => {
+      // A re-render (paint-first cache, then the fresh page) must
+      // not stack a second set of live-feed subscriptions on the
+      // same tokens: release the previous render's first.
+      for (const u of polyListUnsubs) { try { u(); } catch { /* already gone */ } }
+      polyListUnsubs = [];
       polyLastRendered = events;
       const all = [...events];
       slot.innerHTML = `<div class="polyGrid">${events.map(polyCardFor).join('')}</div>`;
@@ -7509,6 +7952,15 @@ async function paintInvestPoly(body: HTMLElement) {
         slot.querySelectorAll(`[data-poly-cents="${tid}"]`).forEach(el => { el.textContent = polyCents(mid); });
       }));
     };
+    // Paint-first (2026-11-24): a list already loaded this session
+    // — or persisted from a previous one — goes on screen NOW and
+    // the fetch below refreshes it in place. The panel never sits
+    // on a loader waiting for the network when it has real markets
+    // to show; if the refresh fails, the failure doctrine in the
+    // catch keeps this paint with a stale note.
+    if (polyPersist && polyPersist.key === key && !polyListMem.has(key)) polyListMem.set(key, polyPersist.events);
+    const prePaint = polyListMem.get(key);
+    if (prePaint && prePaint.length) { if (note) note.innerHTML = ''; render(prePaint); }
     try {
       let events = await gammaEvents(q.length >= 2 ? { search: q } : { tag: polyCat === 'trending' ? undefined : polyCat, limit: PAGE });
       if (!document.body.contains(slot)) return;
@@ -7528,6 +7980,7 @@ async function paintInvestPoly(body: HTMLElement) {
         return;
       }
       polyListMem.set(key, events);
+      if (q.length < 2) { polyPersist = { key, events: events.slice(0, PAGE), at: Date.now() }; saveDataCache(); }
       if (note) note.innerHTML = '';
       render(events);
     } catch {
@@ -7795,6 +8248,35 @@ function showPolyMarket() {
     return bk?.bids[0]?.price ?? q?.bestBid ?? m.prices[selected] ?? 0;
   };
   const paintBook = () => { const s = $('#polyBook'); if (s && currentRoute === 'polymarket') polyBookPaint(s, curBook(), tokenOf(selected)); const bo = $('#polyBookOutcome'); if (bo) bo.textContent = m.outcomes[selected] || ''; };
+  // The custom-amount row's live estimate, in the presets' grammar:
+  // a buy quotes its win at the walked book (or the limit price), a
+  // sell quotes the share count its dollar value converts to at the
+  // current bid (or limit), capped at holdings. Recomputed wherever
+  // paintEst runs, like the preset tiles.
+  const paintQtCustom = () => {
+    const est = $('#qtCustomEst'); if (!est) return;
+    const inp = $('#qtAmt') as unknown as HTMLInputElement | null;
+    const amt = parseFloat(inp?.value || '0') || 0;
+    if (polyTrade.side === 'SELL') {
+      const bk = curBook();
+      const held = polyMyPos && polyMyPos.asset === tokenOf(selected) ? polyMyPos.size : 0;
+      const ref = polyTrade.mode === 'limit' ? (parseFloat(polyTrade.limitCents) || 0) / 100 : (bk?.bids[0]?.price ?? 0);
+      const n = amt > 0 && ref > 0 ? Math.min(held, amt / ref) : 0;
+      est.textContent = held > 0 && n > 0 ? `≈ ${trimNum(n, 1)} shares` : '— shares';
+      return;
+    }
+    let txt = '—';
+    try {
+      const bk = curBook();
+      if (bk && amt > 0) {
+        let price = 0;
+        if (polyTrade.mode === 'market') { if (bk.asks.length) price = walkPrice(bk.asks.slice().sort((a, b) => b.price - a.price), 'BUY', amt, 'FOK'); }
+        else price = (parseFloat(polyTrade.limitCents) || 0) / 100;
+        if (price > 0 && price < 1) txt = fmtUsd(amt / price);
+      }
+    } catch { /* not enough liquidity for that size */ }
+    est.innerHTML = `win <b>${txt}</b>`;
+  };
   // Preset tiles carry the live "win" for their amount at the
   // current book (the quick-trade-panel design) — recomputed wherever
   // paintEst runs: feed ticks, book seeds, side/mode/input changes.
@@ -7830,6 +8312,7 @@ function showPolyMarket() {
       } catch { /* not enough liquidity for that size */ }
       (el as HTMLElement).textContent = txt;
     });
+    paintQtCustom();
   };
   const paintEst = () => {
     paintPresets();
@@ -7985,6 +8468,7 @@ function showPolyMarket() {
     const sa = $('#polySellAmt'); if (sa) sa.style.display = polyTrade.side === 'SELL' ? 'block' : 'none';
     const al = $('#qtActionLabel');
     if (al) al.textContent = qtMode === 'tap' ? `One-tap ${polyTrade.side.toLowerCase()}` : `${polyTrade.side === 'BUY' ? 'Buy' : 'Sell'} · ${qtMode === 'limit' ? 'Limit' : 'Confirm each'}`;
+    const qg = $('#qtCustomGo'); if (qg) qg.textContent = polyTrade.side === 'BUY' ? 'Buy' : 'Sell';
     const sa2 = $('#qtSellAll'); if (sa2) sa2.style.display = polyTrade.side === 'SELL' && polyMyPos && polyMyPos.asset === tokenOf(selected) ? 'block' : 'none';
     paintEst();
   };
@@ -8024,10 +8508,12 @@ function showPolyMarket() {
     document.addEventListener('mousedown', onDocDown);
     document.addEventListener('keydown', onDocKey);
     polyDetailUnsubs.push(() => { document.removeEventListener('mousedown', onDocDown); document.removeEventListener('keydown', onDocKey); });
-    document.querySelectorAll('[data-qtpreset]').forEach(b => (b as HTMLElement).onclick = () => {
-      const amt = parseFloat((b as HTMLElement).dataset.qtpreset || '0');
-      document.querySelectorAll('[data-qtpreset]').forEach(x => x.setAttribute('aria-pressed', 'false'));
-      b.setAttribute('aria-pressed', 'true');
+    // One act path for the preset tiles and the custom-amount row:
+    // a dollar value becomes the buy amount, or — on the sell side —
+    // the share count that value converts to at the current bid (or
+    // the limit price), capped at holdings; then the mode decides
+    // direct post vs review sheet, exactly as the presets always did.
+    const qtAct = (amt: number) => {
       if (polyTrade.side === 'BUY') { polyTrade.amount = String(amt); }
       else {
         const bk = curBook();
@@ -8043,7 +8529,29 @@ function showPolyMarket() {
       if (qtMode === 'tap') { qtStatus('Posting…', true); void polyReviewOrder(m, () => selected, curBook, paintGate, { direct: true, onStatus: (t) => qtStatus(t) }); }
       else if (qtMode === 'limit' && !((parseFloat(polyTrade.limitCents) || 0) > 0)) { qtStatus('Set a limit price first, then tap a preset to review.'); const lp = $('#polyLimitPx'); if (lp) lp.focus(); }
       else { void polyReviewOrder(m, () => selected, curBook, paintGate); }
+    };
+    document.querySelectorAll('[data-qtpreset]').forEach(b => (b as HTMLElement).onclick = () => {
+      const amt = parseFloat((b as HTMLElement).dataset.qtpreset || '0');
+      document.querySelectorAll('[data-qtpreset]').forEach(x => x.setAttribute('aria-pressed', 'false'));
+      b.setAttribute('aria-pressed', 'true');
+      qtAct(amt);
     });
+    // Custom amount: any value he types, validated by the same
+    // review-order path the presets use (affordability against his
+    // pUSD is checked there before anything is signed).
+    const qtAmtIn = $('#qtAmt') as unknown as HTMLInputElement | null;
+    if (qtAmtIn) qtAmtIn.addEventListener('input', () => paintQtCustom());
+    const qtGo = $('#qtCustomGo') as HTMLElement | null;
+    if (qtGo && qtAmtIn) {
+      const fireQtCustom = () => {
+        const amt = parseFloat(qtAmtIn.value || '0');
+        if (!(amt > 0)) { qtStatus('Enter a custom amount first.'); qtAmtIn.focus(); return; }
+        document.querySelectorAll('[data-qtpreset]').forEach(x => x.setAttribute('aria-pressed', 'false'));
+        qtAct(amt);
+      };
+      qtGo.onclick = fireQtCustom;
+      qtAmtIn.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); fireQtCustom(); } });
+    }
     const saBtn = $('#qtSellAll') as HTMLElement | null;
     if (saBtn) saBtn.onclick = () => {
       const held = polyMyPos && polyMyPos.asset === tokenOf(selected) ? polyMyPos.size : 0;
@@ -8653,7 +9161,21 @@ function openHlReview(dex: HlDex, a: HlAsset) {
 
 let hlDetailTimer: ReturnType<typeof setInterval> | null = null;
 async function fetchHlCandles(coin: string, interval: string, hours: number): Promise<{ time: number; open: number; high: number; low: number; close: number; volume: number }[]> {
-  try { const r = await fetch(`/api/hl/candles?coin=${encodeURIComponent(coin)}&interval=${interval}&hours=${hours}`); if (!r.ok) return []; const j = await r.json(); return Array.isArray(j?.candles) ? j.candles : []; } catch { return []; }
+  // Bounded + retried (owner's bug report 2026-11-23: charts stuck on
+  // "unavailable" while prices loaded): a stalled connection must not
+  // hang the chart forever, and one transient failure gets a second
+  // chance after a short pause before the UI gives its honest answer.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const ctl = new AbortController(); const to = setTimeout(() => ctl.abort(), 15000);
+      const r = await fetch(`/api/hl/candles?coin=${encodeURIComponent(coin)}&interval=${interval}&hours=${hours}`, { signal: ctl.signal });
+      clearTimeout(to);
+      if (!r.ok) throw new Error('candles ' + r.status);
+      const j = await r.json();
+      return Array.isArray(j?.candles) ? j.candles : [];
+    } catch { if (attempt === 1) return []; await new Promise(res => setTimeout(res, 900)); }
+  }
+  return [];
 }
 function showHlMarket() {
   const sel = investHlSel; if (!sel) { goTab('invest'); return; }
@@ -8695,7 +9217,10 @@ function showHlMarket() {
     // Chart: HL candles through our proxy — 1D (hourly) + 1W (4h).
     // Mounted once; refresh ticks update it in place.
     void (async () => {
-      const [d1, w1] = await Promise.all([fetchHlCandles(sel.name, '1h', 24), fetchHlCandles(sel.name, '4h', 168)]);
+      let [d1, w1] = await Promise.all([fetchHlCandles(sel.name, '1h', 24), fetchHlCandles(sel.name, '4h', 168)]);
+      // One full retry before the honest "unavailable" — a single
+      // transient failure must not dead-end the chart (2026-11-23).
+      if (d1.length <= 1 && w1.length <= 1) { await new Promise(r => setTimeout(r, 1200)); [d1, w1] = await Promise.all([fetchHlCandles(sel.name, '1h', 24), fetchHlCandles(sel.name, '4h', 168)]); }
       const host = document.getElementById('hlChartBox'); if (!host || currentRoute !== 'hlmarket') return;
       candlePeriods = ([
         { value: 'day', label: '1D', name: 'Past day', unit: 'hour', candles: d1 },

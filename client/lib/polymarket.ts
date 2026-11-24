@@ -142,7 +142,7 @@ export function parseUpDownSlug(slug: string): { asset: string; tfSecs: number }
 }
 export async function gammaEventBySlug(slug: string): Promise<PolyEvent | null> {
   const p = `/events?slug=${encodeURIComponent(slug)}`;
-  const j = await fetchJson(GAMMA + p, gammaProxy(p));
+  const j = await fetchJson(GAMMA + p, gammaProxy(p), 30000);
   const evs = (Array.isArray(j) ? j : []).map(parseEvent).filter((e: PolyEvent) => e.markets.length);
   return evs[0] ?? null;
 }
@@ -155,6 +155,16 @@ export async function gammaMarketByCondition(conditionId: string): Promise<PolyM
   return ms[0] ?? null;
 }
 
+/** One market by condition id, INCLUDING closed markets — gamma's
+ * /markets defaults to closed=false, which makes a resolved market
+ * invisible to the lookup above. Used only to prove resolution. */
+export async function gammaClosedMarketByCondition(conditionId: string): Promise<PolyMarket | null> {
+  const p = `/markets?condition_ids=${encodeURIComponent(conditionId)}&closed=true`;
+  const j = await fetchJson(GAMMA + p, gammaProxy(p));
+  const ms = (Array.isArray(j) ? j : []).map(parseMarket).filter((m: PolyMarket) => m.tokenIds.length);
+  return ms[0] ?? null;
+}
+
 export async function gammaEvents(params: { tag?: string; search?: string; limit?: number; offset?: number }): Promise<PolyEvent[]> {
   const limit = params.limit || 24;
   const offset = params.offset || 0;
@@ -162,13 +172,18 @@ export async function gammaEvents(params: { tag?: string; search?: string; limit
     // Gamma's public search returns events with nested markets.
     // (The endpoint is /public-search?q= — the older /search path 404s.)
     const p = `/public-search?q=${encodeURIComponent(params.search)}&limit_per_type=25&events_status=active`;
-    const j = await fetchJson(GAMMA + p, gammaProxy(p));
+    const j = await fetchJson(GAMMA + p, gammaProxy(p), 30000);
     const evs = Array.isArray(j?.events) ? j.events : [];
     return evs.map(parseEvent).filter((e: PolyEvent) => e.markets.length);
   }
   const qs = `active=true&closed=false&archived=false&limit=${limit}&offset=${offset}&order=volume24hr&ascending=false&exclude_tag_id=102169${params.tag ? '&tag_slug=' + encodeURIComponent(params.tag) : ''}`;
   const p = `/events?${qs}`;
-  const j = await fetchJson(GAMMA + p, gammaProxy(p));
+  // List reads get a 30s budget, not the 12s default (2026-11-24):
+  // even slimmed, a browse page is ~1MB on the wire, and on a
+  // carrier link shared with the app's own asset traffic the 12s
+  // abort fired mid-transfer and the panel reported Polymarket
+  // "unreachable" while the server had the data all along.
+  const j = await fetchJson(GAMMA + p, gammaProxy(p), 30000);
   return (Array.isArray(j) ? j : []).map(parseEvent).filter(e => e.markets.length);
 }
 
@@ -191,18 +206,54 @@ export async function polyTrades(conditionId: string, limit = 25): Promise<PolyT
     size: num(t?.size), price: num(t?.price), ts: Number(t?.timestamp) || 0,
   })).filter((t: PolyTrade) => t.size > 0 && t.price > 0);
 }
+// Resolved-market evidence (2026-11-24): a position whose market
+// has RESOLVED must not sit in the active list valued at a stale
+// mid. Positive evidence only — gamma reports the market closed
+// AND every outcome price pinned at exactly 0 or 1; the returned
+// payout is the position's own outcome price (0 or 1). A failed
+// lookup, a market merely past its end date, or prices not yet
+// pinned all return null (NOT resolved) — "unknown" is never
+// treated as resolved. Verdicts are cached: a proven resolution is
+// permanent; a negative verdict is re-checked at most every 5 min.
+const resVerdicts = new Map<string, { at: number; payout: number | null }>();
+async function provenPayout(conditionId: string, asset: string): Promise<number | null> {
+  const k = conditionId + ':' + asset;
+  const hit = resVerdicts.get(k);
+  if (hit && (hit.payout !== null || Date.now() - hit.at < 5 * 60 * 1000)) return hit.payout;
+  let payout: number | null = null;
+  try {
+    const m = await gammaClosedMarketByCondition(conditionId);
+    if (m && m.closed) {
+      const ix = m.tokenIds.indexOf(asset);
+      if (ix >= 0 && m.prices.length === m.tokenIds.length && m.prices.every(p => p === 0 || p === 1)) payout = m.prices[ix];
+    }
+  } catch { /* transient failure is not evidence */ }
+  resVerdicts.set(k, { at: Date.now(), payout });
+  return payout;
+}
+
 export async function polyPositions(user: string): Promise<PolyPosition[]> {
   // Data API v2 (v1 was retired by Polymarket): envelope {data:[…]},
   // snake_case fields. camelCase fallbacks kept for safety.
   const j = await fetchJson(`${DATA_API}/v2/positions?user=${user}&limit=100`, '/api/poly/positions?user=' + user);
   const arr = Array.isArray(j) ? j : Array.isArray(j?.data) ? j.data : [];
-  return arr.map((p: any) => ({
+  const mapped: (PolyPosition & { status: string })[] = arr.map((p: any) => ({
     title: String(p?.title || ''), outcome: String(p?.outcome || ''),
     size: num(p?.current_size ?? p?.size), avgPrice: num(p?.avg_price ?? p?.avgPrice), curPrice: num(p?.current_price ?? p?.curPrice),
     currentValue: num(p?.current_value ?? p?.currentValue), cashPnl: num(p?.unrealized_pnl ?? p?.cashPnl), percentPnl: num(p?.percent_pnl ?? p?.percentPnl),
     conditionId: String(p?.condition_id ?? p?.conditionId ?? ''), asset: String(p?.token_id ?? p?.asset ?? ''), icon: String(p?.icon || ''), endDate: String(p?.end_date ?? p?.endDate ?? ''),
     status: String(p?.status || ''),
   })).filter((p: PolyPosition & { status: string }) => p.size > 0 && (!p.status || p.status === 'OPEN'));
+  // Drop positions gamma proves resolved (see provenPayout). Only
+  // positions past their market's end date are ever checked, and a
+  // position is dropped ONLY on positive evidence.
+  const now = Date.now();
+  const checked = await Promise.all(mapped.map(async p => {
+    const end = p.endDate ? Date.parse(p.endDate) : NaN;
+    if (!Number.isFinite(end) || end >= now || !p.conditionId || !p.asset) return p;
+    return (await provenPayout(p.conditionId, p.asset)) !== null ? null : p;
+  }));
+  return checked.filter((p): p is PolyPosition & { status: string } => p !== null);
 }
 
 // ---- Live feed: CLOB market channel via the server relay ----

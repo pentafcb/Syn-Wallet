@@ -2,4 +2,4 @@
 // Identical in the client bundle and the server so the client can detect,
 // via /api/health, that the server is running a newer build than the copy
 // it was loaded from.
-export const BUILD_ID = '20261123T045327Z-a48a3d0';
+export const BUILD_ID = '20261124T031949Z-b1b3adb';

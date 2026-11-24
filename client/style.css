@@ -693,6 +693,57 @@ button.sRow:active{background:rgba(255,255,255,.045)}
 .netChip.on{background:var(--grad);color:#0a0c10;border-color:rgba(255,255,255,.35)}
 .netChip i,.polyCat i{font-size:15px}
 .actGroupH{font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);padding:16px 2px 8px}
+/* Activity positions (redesign): native grouped inset cards — the
+   group name + totals live in a header row INSIDE the card, rows
+   match the Activity history rows below (compact medallion,
+   hairlines starting under the text). */
+.opWrap{padding:2px 16px 4px}
+.opPanel{background:linear-gradient(100deg,#0d0d0d,#141414 55%,#191919);border-radius:16px;padding:14px 14px 8px;color:#f5f5f5;text-align:left}
+.op-head{display:flex;align-items:flex-start;justify-content:space-between;padding:0 2px 10px}
+.op-hmain{display:flex;flex-direction:column;gap:1px}
+.op-hlabel{font-size:10px;font-weight:600;letter-spacing:.08em;color:#8b919c;text-transform:uppercase}
+.op-total{font-size:21px;font-weight:800;letter-spacing:-.01em;font-variant-numeric:tabular-nums}
+.op-total.pos{color:#34d399}.op-total.neg{color:#f87171}.op-total.flat{color:#e8ebef}
+.op-count{font-size:11px;color:#8b919c;font-weight:600;background:rgba(255,255,255,.05);padding:4px 8px;border-radius:99px}
+.op-sec{display:flex;align-items:center;gap:6px;font-size:10.5px;font-weight:700;letter-spacing:.07em;color:#9aa3af;text-transform:uppercase;padding:8px 2px 4px;border-top:1px solid rgba(255,255,255,.06);margin-top:2px}
+.op-venue{display:inline-flex;align-items:center;gap:6px;line-height:1;color:#626a76;font-weight:600;letter-spacing:.02em;text-transform:none;font-size:10.5px}
+.op-vlogo{width:18px;height:18px;border-radius:5px;object-fit:contain;flex:none}
+.op-list{max-height:150px;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.16) transparent}
+.op-list::-webkit-scrollbar{width:4px}
+.op-list::-webkit-scrollbar-thumb{background:rgba(255,255,255,.14);border-radius:4px}
+.op-row{display:flex;align-items:center;gap:10px;padding:7px 2px;cursor:pointer}
+.op-ic{width:34px;height:34px;flex:none;border-radius:10px;display:grid;place-items:center;background:rgba(255,255,255,.05);font-size:13px;font-weight:700;color:#c7d0da;position:relative;overflow:hidden}
+.op-ic.white{background:#fff}
+.op-pmimg{width:21px;height:21px;display:block;object-fit:contain}
+.op-main{flex:1;min-width:0}
+.op-name{font-size:13.5px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.op-sub{font-size:11.5px;color:#8b919c;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.op-right{text-align:right;flex:none}
+.op-pnl{font-size:13.5px;font-weight:750;font-variant-numeric:tabular-nums}
+.op-pnl.pos{color:#34d399}.op-pnl.neg{color:#f87171}
+.op-val{font-size:11.5px;color:#8b919c;margin-top:1px;font-variant-numeric:tabular-nums}
+.op-empty{padding:13px 2px 15px;font-size:12.5px;color:#626a76}
+.actPosWrap{padding:0 16px}
+.actPosSec{font-size:12px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--faint);padding:14px 2px 8px}
+.actPosCard{margin-bottom:10px}
+.actPosHead{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 14px 9px 12px;position:relative}
+.actPosHead::after{content:"";position:absolute;left:12px;right:0;bottom:0;height:1px;background:var(--line2)}
+.actPosHeadName{font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--faint)}
+.actPosHeadSums{flex:none;display:flex;flex-direction:column;align-items:flex-end;gap:1px;font-variant-numeric:tabular-nums}
+.actPosHeadVal{font-size:13.5px;font-weight:650;color:var(--hi)}
+.actPosHeadPnl{font-size:11.5px;font-weight:600}
+.actPosHeadPnl.pos,.actPosVal .pos{color:var(--green)}
+.actPosHeadPnl.neg,.actPosVal .neg{color:var(--red)}
+.actPosRow{display:flex;align-items:center;gap:10px;width:100%;padding:9px 14px 9px 12px;position:relative;color:var(--hi);cursor:pointer}
+.actPosRow:active{background:rgba(255,255,255,.045)}
+.actPosRow + .actPosRow::before{content:"";position:absolute;top:0;left:60px;right:0;height:1px;background:var(--line2)}
+.actPosRow .polyEvIc{width:38px;height:38px;border-radius:10px}
+.actPosTx{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+.actPosT{font-size:13.5px;font-weight:600;letter-spacing:-.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.actPosS{font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums;line-height:1.4}
+.actPosVal{flex:none;display:flex;flex-direction:column;align-items:flex-end;gap:1px;font-size:13.5px;font-weight:600;font-variant-numeric:tabular-nums}
+.actPosVal .pos,.actPosVal .neg{font-size:11.5px;font-weight:600}
+.actPosNote{font-size:12.5px;color:var(--muted);line-height:1.55;padding:0 2px 4px}
 .emptyState{display:flex;flex-direction:column;align-items:center;text-align:center;padding:56px 32px 40px}
 .emptyIc{width:64px;height:64px;border-radius:50%;background:var(--fill04);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-size:26px;color:var(--steel);margin-bottom:14px;box-shadow:inset 0 1px 0 rgba(255,255,255,.06)}
 .emptyT{font-size:16px;font-weight:600;letter-spacing:-.01em}
@@ -1185,6 +1236,31 @@ input,textarea,select{font-size:16px!important}
 .evcBookmark:hover{background:rgba(255,255,255,.08);color:#f5f5f5}
 .evcBookmark.on{color:#f5f5f5}
 .evcBookmark svg{width:16px;height:16px}
+/* Hyperliquid Invest rows: the Active Position card (Components
+   Library #nvdaPos, final compact 132px cut) — fill-panel gradient,
+   orb logo badge, price/change under the title, 24H VOL top-right,
+   orb Long/Short pair with the live skew, 34px live mini chart.
+   Visual only: the whole card navigates to the market detail. */
+.hlPosList{display:flex;flex-direction:column;gap:10px;padding:0 16px}
+.hlPosCard{position:relative;border-radius:16px;padding:8px 11px 7px;background-image:linear-gradient(100deg,#0d0d0d 0%,#141414 55%,#191919 100%);font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:#f5f5f5;cursor:pointer;transition:transform 200ms cubic-bezier(.2,.9,.25,1);text-align:left;width:100%}
+.hlPosCard:hover{transform:translateY(-2px)}
+.hlPosHeader{display:flex;align-items:flex-start;gap:12px}
+.hlPosBadge{position:relative;display:grid;place-items:center;width:34px;height:34px;flex:none;border-radius:10px;overflow:hidden;font-size:15px;font-weight:700;line-height:1;color:#fff;background:radial-gradient(circle at 68% 6%,rgba(233,167,128,.9) 0%,rgba(233,167,128,0) 32%),radial-gradient(circle at 27% 16%,rgba(182,211,230,.85) 0%,rgba(182,211,230,0) 44%),radial-gradient(circle at 8% 44%,rgba(160,124,130,.5) 0%,rgba(160,124,130,0) 36%),linear-gradient(180deg,#98a4cf 0%,#7588db 32%,#6a88ee 52%,#47579c 82%,#313763 100%);background-size:130% 130%;background-position:50% 50%}
+.hlPosBadgeImg{border-radius:10px}
+.hlPosMain{display:flex;flex-direction:column;min-width:0}
+.hlPosTitle{margin:1px 0 0;font-size:13.5px;font-weight:600;color:#f5f5f5;text-decoration:underline;text-decoration-color:rgba(255,255,255,.2);text-underline-offset:4px}
+.hlPosPrice{display:flex;align-items:baseline;gap:7px;margin-top:1px}
+.hlPosP{font-size:13px;font-weight:700;color:#f2f4f7}
+.hlPosChg{font-size:11.5px;font-weight:650;color:#8b95a5}
+.hlPosChg.pos{color:#34d399}
+.hlPosChg.neg{color:#f87171}
+.hlPosVol{margin-left:auto;text-align:right;display:flex;flex-direction:column;gap:1px;flex:none}
+.hlPosVolL{font-size:9px;letter-spacing:.09em;color:#8b919c;font-weight:600}
+.hlPosVolV{font-size:12.5px;font-weight:700;color:#e8ebef}
+.hlPosCard .mmcOrb{height:34px}
+.hlPosCard .mmcSlot{width:30px;height:30px;border-radius:10px}
+.hlPosChart{margin-top:5px}
+.hlPosChart canvas{display:block;width:100%;height:34px}
 .polyMoreWrap{display:flex;justify-content:center;padding:14px 16px 20px}
 .polyMoreBtn{border-radius:999px;padding:10px 22px}
 .polyOutPills{display:flex;gap:8px;padding:14px 16px 0}
@@ -1304,6 +1380,16 @@ input,textarea,select{font-size:16px!important}
 .qtAmt{font-size:18px;font-weight:600;font-variant-numeric:tabular-nums}
 .qtWin{margin-top:2px;font-size:11px;color:#737373}
 .qtWin b{font-weight:400;color:#34d399;font-variant-numeric:tabular-nums}
+.qtCustom{margin-top:8px;display:flex;align-items:center;gap:10px}
+.qtCustomIn{flex:1;min-width:0;display:flex;align-items:center;gap:3px;height:47px;padding:0 12px;border-radius:12px;border:1px solid #1c1c1c;background:rgba(255,255,255,.02)}
+.qtCustomIn:focus-within{border-color:rgba(255,255,255,.22)}
+.qtCustomCur{font-size:16px;color:#a3a3a3}
+.qtAmtIn{flex:1;min-width:0;background:none;border:0;outline:none;color:#f5f5f5;font:inherit;font-size:16px;font-weight:600;font-variant-numeric:tabular-nums}
+.qtAmtIn::placeholder{color:#737373;font-weight:400;font-size:14px}
+.qtCustom .qtWin{margin-top:0;white-space:nowrap}
+.qtCustomGo{flex:none;height:47px;padding:0 20px;border-radius:12px;background:#f5f5f5;color:#111;font-size:15px;font-weight:650}
+.qtCustomGo:hover{background:#fff}
+.qtCustomGo:active{transform:scale(.97)}
 /* Mini market card — the standalone component, exact values */
 .mmcCard{background-color:transparent;background-image:linear-gradient(100deg,#0d0d0d 0%,#141414 55%,#191919 100%);border:0;border-radius:16px;padding:16px;font-family:"Inter",ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;transition:transform 200ms cubic-bezier(.2,.9,.25,1),box-shadow 200ms cubic-bezier(.2,.9,.25,1)}
 .mmcCard:hover{transform:translateY(-2px)}

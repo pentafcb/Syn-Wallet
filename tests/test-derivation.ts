@@ -1,9 +1,13 @@
 import assert from 'node:assert';
-import { deriveAll, deriveAll2, isValidMnemonic, solanaSecretKeyBase58, btcWifFromPrivateKey, suiPrivateKeyBech32, aptosPrivateKeyExport } from '../client/lib/wallet.js';
+import { deriveAll, deriveAll2, isValidMnemonic, solanaSecretKeyBase58, btcWifFromPrivateKey, utxoWifFromPrivateKey, suiPrivateKeyBech32, aptosPrivateKeyExport } from '../client/lib/wallet.js';
 import { Keypair } from '@solana/web3.js';
 import { ethers } from 'ethers';
 import { base58, base16, bech32 } from '@scure/base';
 import { sha256 } from '@noble/hashes/sha2';
+import { ripemd160 } from '@noble/hashes/legacy';
+import { keccak_256 } from '@noble/hashes/sha3';
+import { secp256k1 } from '@noble/curves/secp256k1';
+import * as btc from '@scure/btc-signer';
 const MN = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
 assert.equal(isValidMnemonic(MN), true);
 assert.equal(isValidMnemonic('not a real mnemonic phrase at all not a real mnemonic phrase'), false, 'nonsense must fail');
@@ -58,7 +62,42 @@ assert.equal(suiBytes[0], 0, 'Sui ed25519 flag byte');
 assert.equal(base16.encode(Uint8Array.from(suiBytes.slice(1))), base16.encode(d2.suiSeed32), 'Sui export carries the derived key');
 // Aptos AIP-80: ed25519-priv-0x<hex of seed32>.
 assert.equal(aptosPrivateKeyExport(d2.aptosSeed32), 'ed25519-priv-0x' + base16.encode(d2.aptosSeed32).toLowerCase(), 'Aptos AIP-80 format');
-// TRON/XRP/Cosmos exports are the derived hex keys themselves.
+// TRON/XRP/Cosmos exports are the derived hex keys themselves — each
+// must recompute the wallet's address for that chain from the key alone.
 assert.equal(d2.tronPrivateKeyHex.length, 64, 'TRON hex key');
 assert.equal(new ethers.Wallet('0x' + d2.tronPrivateKeyHex).address.length, 42, 'TRON key is a valid secp256k1 key');
+function b58checkEncode(payload: Uint8Array, alphabet: string): string {
+  const checksum = sha256(sha256(payload)).slice(0, 4);
+  const full = new Uint8Array(payload.length + 4); full.set(payload); full.set(checksum, payload.length);
+  let zeros = 0; while (zeros < full.length && full[zeros] === 0) zeros++;
+  let num = 0n; for (const b of full) num = num * 256n + BigInt(b);
+  let out = '';
+  while (num > 0n) { out = alphabet[Number(num % 58n)] + out; num /= 58n; }
+  return alphabet[0].repeat(zeros) + out;
+}
+const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+const XRP_A = 'rpshnaf39wBUDNEGHJKLM4PQRST7VWXYZ2bcdeCg65jkm8oFqi1tuvAxyz';
+// TRON: address = base58check(0x41 || last20(keccak256(uncompressed pub)))
+const tronPub = secp256k1.getPublicKey(base16.decode(d2.tronPrivateKeyHex), false);
+const tronPayload = new Uint8Array(21); tronPayload[0] = 0x41; tronPayload.set(keccak_256(tronPub.slice(1)).slice(-20), 1);
+assert.equal(b58checkEncode(tronPayload, B58), d2.tronAddress, 'TRON: revealed key recomputes the wallet address');
+// XRP: address = base58check(0x00 || RIPEMD160(SHA256(compressed pub)), XRP alphabet)
+const xrpPub = secp256k1.getPublicKey(base16.decode(d2.xrpPrivateKeyHex), true);
+const xrpPayload = new Uint8Array(21); xrpPayload[0] = 0x00; xrpPayload.set(ripemd160(sha256(xrpPub)), 1);
+assert.equal(b58checkEncode(xrpPayload, XRP_A), d2.xrpAddress, 'XRP: revealed key recomputes the wallet address');
+// Cosmos: address = bech32('cosmos', RIPEMD160(SHA256(compressed pub)))
+const cosPub = secp256k1.getPublicKey(base16.decode(d2.cosmosPrivateKeyHex), true);
+assert.equal(bech32.encode('cosmos', bech32.toWords(ripemd160(sha256(cosPub)))), d2.cosmosAddress, 'Cosmos: revealed key recomputes the wallet address');
+// Litecoin WIF: 0xb0 prefix (WIFs start with 'T'), carries the BIP84 key,
+// and that key re-derives the wallet's ltc1q address.
+const ltcWif = utxoWifFromPrivateKey(base16.decode(d2.ltcPrivateKeyHex), 0xb0);
+assert.equal(ltcWif.startsWith('T'), true, 'LTC WIF prefix shape');
+const ltcRaw = base58.decode(ltcWif);
+assert.equal(ltcRaw[0], 0xb0, 'LTC WIF version byte');
+assert.equal(ltcRaw[33], 0x01, 'LTC WIF compressed marker');
+assert.equal(base16.encode(ltcRaw.slice(1, 33)).toLowerCase(), d2.ltcPrivateKeyHex.toLowerCase(), 'LTC WIF carries the derived key');
+const ltcBody = ltcRaw.slice(0, ltcRaw.length - 4);
+assert.deepEqual([...sha256(sha256(ltcBody)).slice(0, 4)], [...ltcRaw.slice(ltcRaw.length - 4)], 'LTC WIF checksum valid');
+const LTC_NET = { bech32: 'ltc', pubKeyHash: 0x30, scriptHash: 0x32, wif: 0xb0 };
+assert.equal(btc.p2wpkh(secp256k1.getPublicKey(base16.decode(d2.ltcPrivateKeyHex), true), LTC_NET).address, d2.ltcAddress, 'LTC: revealed key re-derives the wallet address');
 console.log('ALL DERIVATION TESTS PASSED');
