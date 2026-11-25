@@ -7540,6 +7540,18 @@ function polyOrbPills(m: PolyMarket): string {
 // recent trade ≥ $1, coloured by which outcome the money moved
 // toward; slots without a real trade stay empty.
 const UD_COIN_LOGOS: Record<string, string> = { btc: '/assets/coins/bitcoin.png', eth: '/assets/coins/ethereum.png', sol: '/assets/coins/solana.png', xrp: '/assets/coins/xrp.png' };
+// An Up or Down market's icon is ALWAYS its underlying asset's own
+// logo, resolved from the asset the market's slug itself names
+// (btc -> BTC): the wired series' chain icons first, then the
+// underlying-icon table by symbol for any other asset the series
+// covers (bnb, doge, hype...). No match -> '' and the caller
+// renders the neutral letter tile -- never another asset's glyph
+// as a default (the quick-trade tile used to hardcode Ethereum's
+// diamond, so a Bitcoin market wore the ETH logo).
+function upDownLogo(asset: string): string {
+  if (!asset) return '';
+  return UD_COIN_LOGOS[asset] || underlyingIconUrl(asset.toUpperCase()) || '';
+}
 const MMC_TIP_DELAYS = [0, -1300, -600, -2500, -1900, -3100];
 const MMC_TIP_OP = ['o70', 'o70', 'o80', 'o50', 'o50', 'o80'];
 const MMC_TREND_UP = '<svg viewBox="0 0 256 256" fill="currentColor" style="color:#fff"><path d="M232,56v64a8,8,0,0,1-16,0V75.31l-82.34,82.35a8,8,0,0,1-11.31,0L76.69,112,28.34,160.34a8,8,0,0,1-11.31-11.31l54-54a8,8,0,0,1,11.31,0L128,140.69,192.69,76H168a8,8,0,0,1,0-16h56A8,8,0,0,1,232,56Z"/></svg>';
@@ -7550,7 +7562,7 @@ function mmcCardHTML(e: PolyEvent, m: PolyMarket, title: string, letter: string)
   const p1 = m.prices[1] ?? (1 - p);
   const endMs = Date.parse(m.endDate || e.endDate);
   const asset = parseUpDownSlug(m.slug)?.asset || '';
-  const logo = UD_COIN_LOGOS[asset] || '';
+  const logo = upDownLogo(asset);
   const badge = `${esc(letter || '?')}${logo ? `<img class="coinImg mmcBadgeImg" src="${logo}" alt="" loading="lazy" decoding="async">` : ''}`;
   return `<div class="polyCard mmcCard strokeLit" data-polym="${esc(m.conditionId)}" data-mmc-cond="${esc(m.conditionId)}" role="button" tabindex="0">
     <div class="mmcHeader"><span class="mmcBadge">${badge}</span><h3 class="mmcTitle">${esc(title)}</h3><div class="mmcGauge"><svg viewBox="0 0 48 26" fill="none" aria-hidden="true"><path d="M5 24A19 19 0 0 1 43 24" stroke="#1c1c1c" stroke-width="4" stroke-linecap="round"/><path d="M5 24A19 19 0 0 1 43 24" stroke="#34d399" stroke-width="4" stroke-linecap="round" stroke-dasharray="${(p * 59.69).toFixed(2)} 59.69"/></svg><div class="mmcGaugePct" data-poly-price="${esc(m.tokenIds[0] || '')}">${polyPct(p)}</div><div class="mmcGaugeLbl">${esc(m.outcomes[0] || 'Up')}</div></div></div>
@@ -7707,10 +7719,10 @@ function ltWindowLine(startMs: number, endMs: number): string {
 function ltCardHTML(eventTitle: string, tfSecs: number, startMs: number, endMs: number, asset = ''): string {
   const tfLabel = tfSecs === 300 ? '5m' : tfSecs === 900 ? '15m' : '1h';
   const title = (eventTitle || '').split(' - ')[0] + ' ' + tfLabel;
-  const logo = UD_COIN_LOGOS[asset] || '';
+  const logo = upDownLogo(asset);
   return `<div class="ltCard">
     <div class="ltHeader">
-      <span class="ltLogo">${logo ? `<img class="ltLogoImg" src="${logo}" alt="">` : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2 4.5 12.2 12 16.6l7.5-4.4L12 2Z"/><path d="M12 22.2 4.5 13.7 12 18.1l7.5-4.4L12 22.2Z" opacity=".72"/></svg>'}</span>
+      <span class="ltLogo">${logo ? `<img class="ltLogoImg" src="${logo}" alt="">` : `<span class="ltLogoLetter">${esc((title || '?').trim().charAt(0).toUpperCase() || '?')}</span>`}</span>
       <div class="ltTitle"><h3>${esc(title)}</h3>
         <div class="ltSub"><span>${esc(ltWindowLine(startMs, endMs))}</span><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8h.01"/></svg></div>
       </div>
@@ -7734,8 +7746,8 @@ function ltCardHTML(eventTitle: string, tfSecs: number, startMs: number, endMs: 
   </div>`;
 }
 // ---- Quick trade panel (Up or Down detail) ----
-// The standalone quick-trade component, ported exactly: indigo
-// diamond tile, muted market title, coloured side label, underline
+// The standalone quick-trade component, ported exactly: the
+// underlying asset's logo tile, muted market title, coloured side label, underline
 // tabs, the 1-Tap / Confirm each / Limit select menu, aurora-orb
 // side buttons with live cent labels, $5/$25/$100 presets with live
 // win lines, and the Terms footer. Execution is the wallet's real
@@ -7745,12 +7757,14 @@ function ltCardHTML(eventTitle: string, tfSecs: number, startMs: number, endMs: 
 // apply unchanged.
 const QT_TREND_UP = 'M232,104a8,8,0,0,1-8,8H184a8,8,0,0,1,0-16h28.7L134.3,101.4a8,8,0,0,1-11.3,0L88,66.3,51.3,103a8,8,0,0,1-11.3-11.3l48-48a8,8,0,0,1,11.3,0l35,35L205.4,8H176a8,8,0,0,1,0-16h48a8,8,0,0,1,8,8Z';
 const QT_TREND_DN = 'M232,152a8,8,0,0,1-8,8H184a8,8,0,0,1,0-16h28.7l-78.4,5.4a8,8,0,0,1-11.3,0L88,189.7,51.3,153A8,8,0,0,1,40,141.7l48-48a8,8,0,0,1,11.3,0l35,35L205.4,248H176a8,8,0,0,1,0-16h48a8,8,0,0,1,8,8Z';
-function qtPanelHTML(sel: { eventTitle: string; outcomeIx: number }, m: PolyMarket): string {
+function qtPanelHTML(sel: { eventTitle: string; outcomeIx: number }, m: PolyMarket, asset = ''): string {
   const title = (sel.eventTitle || '').split(' - ')[0];
   const side0 = m.outcomes[sel.outcomeIx] || '';
+  const logo = upDownLogo(asset);
+  const letter = (title || '?').trim().charAt(0).toUpperCase() || '?';
   return `<div class="qtPanel qtStrokeLit qtFillPanel" role="region" aria-label="Quick trade panel">
     <div class="qtHead">
-      <span class="qtLogo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="#fff"><path d="M12 2.8 17.2 11.5 12 14.62 6.8 11.5 12 2.8Z"/><path d="M6.8 13.36 12 16.48 17.2 13.36 12 20.9 6.8 13.36Z"/></svg></span>
+      <span class="qtLogo" aria-hidden="true">${logo ? `<img class="qtLogoImg" src="${logo}" alt="">` : esc(letter)}</span>
       <div><div class="qtSub">${esc(title)}</div><div class="qtSide${side0 === 'Down' ? ' down' : ''}" id="qtSideLabel">${esc(side0)}</div></div>
     </div>
     <div class="qtTabs" role="tablist" aria-label="Order type">
@@ -8155,7 +8169,7 @@ function showPolyMarket() {
   ${ud ? '' : `<div class="polyPriceBlock"><span class="polyBigWrap"><span class="polyBigPrice" id="polyBigPrice">${polyPctNum(m.prices[sel.outcomeIx] ?? 0)}</span><span class="polyBigPct">%</span></span><span class="polyChanceLine">chance · <span id="polyLastTrade">${m.lastTrade ? 'last ' + polyCents(m.lastTrade) : ''}</span></span></div>
   <div class="polyChartWrap fillPanel strokeLit"><canvas id="polyChart"></canvas><div class="polyChartEmpty" id="polyChartEmpty">${waveLoadBlockHTML('Loading…', true)}</div></div>`}
   <div class="gGroup"><div class="gHead">Order book · <span id="polyBookOutcome">${esc(m.outcomes[sel.outcomeIx] || '')}</span></div><div class="gCard polyBookCard"><div id="polyBook">${waveLoadBlockHTML('Loading…', true)}</div></div></div>
-  ${ud ? `<div style="padding:14px 16px 0">${qtPanelHTML(sel, m)}</div>` : `  <div class="gGroup"><div class="gHead">Trade</div><div class="gCard polyPanel" style="padding:14px">
+  ${ud ? `<div style="padding:14px 16px 0">${qtPanelHTML(sel, m, ud.asset)}</div>` : `  <div class="gGroup"><div class="gHead">Trade</div><div class="gCard polyPanel" style="padding:14px">
     <div class="polySideTabs"><button data-tside="BUY" class="on">Buy</button><button data-tside="SELL">Sell</button><span class="polyModeSeg"><button data-tmode="market" class="on">Market</button><button data-tmode="limit">Limit</button></span></div>
     <div id="polyLimitRow" style="display:none"><label class="polyFldLbl">Limit price (¢)</label><input id="polyLimitPx" class="polyIn" inputmode="decimal" placeholder="50"></div>
     <div id="polyBuyAmt"><label class="polyFldLbl">Amount (pUSD)</label><div class="polyAmtWrap"><input id="polyAmt" class="polyIn" inputmode="decimal" value="25"></div><div class="polyPresetGrid">${[5, 25, 100].map(a => `<button class="polyPreset" data-preset="${a}"><span class="ppAmt">$${a}</span><span class="ppWin">win <b data-win="${a}">—</b></span></button>`).join('')}</div></div>
