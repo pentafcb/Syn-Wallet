@@ -204,21 +204,22 @@ The interface is hand-built in vanilla TypeScript and CSS â€” no UI framework â€
 ## Screenshots
 
 <p align="center">
+    <img src="screenshots/IMG_2037.png" width="260" />
     <img src="screenshots/welcome.png" width="260" />
     <img src="screenshots/bitcoin.png" width="260" />
-    <img src="screenshots/invest.png" width="260" />
 </p>
 <p align="center">
+    <img src="screenshots/invest.png" width="260" />
     <img src="screenshots/prediction.png" width="260" />
     <img src="screenshots/up-or-down.png" width="260" />
-    <img src="screenshots/stocks.png" width="260" />
 </p>
 <p align="center">
+    <img src="screenshots/stocks.png" width="260" />
     <img src="screenshots/activity.png" width="260" />
     <img src="screenshots/stake.png" width="260" />
-    <img src="screenshots/nfts.png" width="260" />
 </p>
 <p align="center">
+    <img src="screenshots/nfts.png" width="260" />
     <img src="screenshots/discover.png" width="260" />
     <img src="screenshots/settings.png" width="260" />
 </p>
