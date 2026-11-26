@@ -16,6 +16,8 @@
 
 [Features](#features) · [Architecture](#architecture) · [Tech stack](#tech-stack) · [Security](#security-model) · [Getting started](#getting-started) · [Credits](#credits) · [License](#license)
 
+<img src="screenshots/syn-wallet-promo.gif" alt="Syn Wallet demo" width="640">
+
 </div>
 
 ---
